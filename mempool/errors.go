@@ -1,8 +1,9 @@
 package mempool
 
 import (
-	"errors"
 	"fmt"
+
+	"github.com/pkg/errors"
 )
 
 var (

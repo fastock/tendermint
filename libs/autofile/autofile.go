@@ -79,7 +79,7 @@ func OpenAutoFile(path string) (*AutoFile, error) {
 	signal.Notify(af.hupc, syscall.SIGHUP)
 	go func() {
 		for range af.hupc {
-			_ = af.closeFile()
+			af.closeFile()
 		}
 	}()
 
@@ -103,7 +103,7 @@ func (af *AutoFile) closeFileRoutine() {
 	for {
 		select {
 		case <-af.closeTicker.C:
-			_ = af.closeFile()
+			af.closeFile()
 		case <-af.closeTickerStopc:
 			return
 		}

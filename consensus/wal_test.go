@@ -3,6 +3,8 @@ package consensus
 import (
 	"bytes"
 	"crypto/rand"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 
 	// "sync"
@@ -25,7 +27,10 @@ const (
 )
 
 func TestWALTruncate(t *testing.T) {
-	walDir := t.TempDir()
+	walDir, err := ioutil.TempDir("", "wal")
+	require.NoError(t, err)
+	defer os.RemoveAll(walDir)
+
 	walFile := filepath.Join(walDir, "wal")
 
 	// this magic number 4K can truncate the content when RotateFile.
@@ -40,14 +45,12 @@ func TestWALTruncate(t *testing.T) {
 	wal.SetLogger(log.TestingLogger())
 	err = wal.Start()
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		if err := wal.Stop(); err != nil {
-			t.Error(err)
-		}
+	defer func() {
+		wal.Stop()
 		// wait for the wal to finish shutting down so we
 		// can safely remove the directory
 		wal.Wait()
-	})
+	}()
 
 	// 60 block's size nearly 70K, greater than group's headBuf size(4096 * 10),
 	// when headBuf is full, truncate content will Flush to the file. at this
@@ -55,18 +58,16 @@ func TestWALTruncate(t *testing.T) {
 	err = WALGenerateNBlocks(t, wal.Group(), 60)
 	require.NoError(t, err)
 
-	time.Sleep(1 * time.Millisecond) // wait groupCheckDuration, make sure RotateFile run
+	time.Sleep(1 * time.Millisecond) //wait groupCheckDuration, make sure RotateFile run
 
-	if err := wal.FlushAndSync(); err != nil {
-		t.Error(err)
-	}
+	wal.FlushAndSync()
 
 	h := int64(50)
 	gr, found, err := wal.SearchForEndHeight(h, &WALSearchOptions{})
 	assert.NoError(t, err, "expected not to err on height %d", h)
 	assert.True(t, found, "expected to find end height for %d", h)
 	assert.NotNil(t, gr)
-	t.Cleanup(func() { _ = gr.Close() })
+	defer gr.Close()
 
 	dec := NewWALDecoder(gr)
 	msg, err := dec.Decode()
@@ -81,7 +82,6 @@ func TestWALEncoderDecoder(t *testing.T) {
 	msgs := []TimedWALMessage{
 		{Time: now, Msg: EndHeightMessage{0}},
 		{Time: now, Msg: timeoutInfo{Duration: time.Second, Height: 1, Round: 1, Step: types.RoundStepPropose}},
-		{Time: now, Msg: tmtypes.EventDataRoundState{Height: 1, Round: 1, Step: ""}},
 	}
 
 	b := new(bytes.Buffer)
@@ -98,27 +98,28 @@ func TestWALEncoderDecoder(t *testing.T) {
 		dec := NewWALDecoder(b)
 		decoded, err := dec.Decode()
 		require.NoError(t, err)
+
 		assert.Equal(t, msg.Time.UTC(), decoded.Time)
 		assert.Equal(t, msg.Msg, decoded.Msg)
 	}
 }
 
 func TestWALWrite(t *testing.T) {
-	walDir := t.TempDir()
+	walDir, err := ioutil.TempDir("", "wal")
+	require.NoError(t, err)
+	defer os.RemoveAll(walDir)
 	walFile := filepath.Join(walDir, "wal")
 
 	wal, err := NewWAL(walFile)
 	require.NoError(t, err)
 	err = wal.Start()
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		if err := wal.Stop(); err != nil {
-			t.Error(err)
-		}
+	defer func() {
+		wal.Stop()
 		// wait for the wal to finish shutting down so we
 		// can safely remove the directory
 		wal.Wait()
-	})
+	}()
 
 	// 1) Write returns an error if msg is too big
 	msg := &BlockPartMessage{
@@ -127,17 +128,14 @@ func TestWALWrite(t *testing.T) {
 		Part: &tmtypes.Part{
 			Index: 1,
 			Bytes: make([]byte, 1),
-			Proof: merkle.Proof{
+			Proof: merkle.SimpleProof{
 				Total:    1,
 				Index:    1,
 				LeafHash: make([]byte, maxMsgSizeBytes-30),
 			},
 		},
 	}
-
-	err = wal.Write(msgInfo{
-		Msg: msg,
-	})
+	err = wal.Write(msg)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "msg is too big")
 	}
@@ -159,7 +157,7 @@ func TestWALSearchForEndHeight(t *testing.T) {
 	assert.NoError(t, err, "expected not to err on height %d", h)
 	assert.True(t, found, "expected to find end height for %d", h)
 	assert.NotNil(t, gr)
-	t.Cleanup(func() { _ = gr.Close() })
+	defer gr.Close()
 
 	dec := NewWALDecoder(gr)
 	msg, err := dec.Decode()
@@ -170,10 +168,12 @@ func TestWALSearchForEndHeight(t *testing.T) {
 }
 
 func TestWALPeriodicSync(t *testing.T) {
-	walDir := t.TempDir()
+	walDir, err := ioutil.TempDir("", "wal")
+	require.NoError(t, err)
+	defer os.RemoveAll(walDir)
+
 	walFile := filepath.Join(walDir, "wal")
 	wal, err := NewWAL(walFile, autofile.GroupCheckDuration(1*time.Millisecond))
-
 	require.NoError(t, err)
 
 	wal.SetFlushInterval(walTestFlushInterval)
@@ -187,12 +187,10 @@ func TestWALPeriodicSync(t *testing.T) {
 	assert.NotZero(t, wal.Group().Buffered())
 
 	require.NoError(t, wal.Start())
-	t.Cleanup(func() {
-		if err := wal.Stop(); err != nil {
-			t.Error(err)
-		}
+	defer func() {
+		wal.Stop()
 		wal.Wait()
-	})
+	}()
 
 	time.Sleep(walTestFlushInterval + (10 * time.Millisecond))
 
@@ -230,13 +228,12 @@ func nBytes(n int) []byte {
 
 func benchmarkWalDecode(b *testing.B, n int) {
 	// registerInterfacesOnce()
+
 	buf := new(bytes.Buffer)
 	enc := NewWALEncoder(buf)
 
 	data := nBytes(n)
-	if err := enc.Encode(&TimedWALMessage{Msg: data, Time: time.Now().Round(time.Second).UTC()}); err != nil {
-		b.Error(err)
-	}
+	enc.Encode(&TimedWALMessage{Msg: data, Time: time.Now().Round(time.Second).UTC()})
 
 	encoded := buf.Bytes()
 

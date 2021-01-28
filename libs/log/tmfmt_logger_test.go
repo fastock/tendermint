@@ -53,12 +53,6 @@ func TestTMFmtLogger(t *testing.T) {
 		t.Fatal(err)
 	}
 	assert.Regexp(t, regexp.MustCompile(`N\[.+\] unknown \s+module=wire\s+\n$`), buf.String())
-
-	buf.Reset()
-	if err := logger.Log("hash", []byte("test me")); err != nil {
-		t.Fatal(err)
-	}
-	assert.Regexp(t, regexp.MustCompile(`N\[.+\] unknown \s+ hash=74657374206D65\n$`), buf.String())
 }
 
 func BenchmarkTMFmtLoggerSimple(b *testing.B) {
@@ -83,7 +77,6 @@ func benchmarkRunnerKitlog(b *testing.B, logger kitlog.Logger, f func(kitlog.Log
 	}
 }
 
-//nolint: errcheck // ignore errors
 var (
 	baseMessage = func(logger kitlog.Logger) { logger.Log("foo_key", "foo_value") }
 	withMessage = func(logger kitlog.Logger) { kitlog.With(logger, "a", "b").Log("d", "f") }

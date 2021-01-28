@@ -43,7 +43,7 @@ type Metrics struct {
 	ByzantineValidatorsPower metrics.Gauge
 
 	// Time between this and the last block.
-	BlockIntervalSeconds metrics.Histogram
+	BlockIntervalSeconds metrics.Gauge
 
 	// Number of transactions.
 	NumTxs metrics.Gauge
@@ -55,11 +55,15 @@ type Metrics struct {
 	CommittedHeight metrics.Gauge
 	// Whether or not a node is fast syncing. 1 if yes, 0 if no.
 	FastSyncing metrics.Gauge
-	// Whether or not a node is state syncing. 1 if yes, 0 if no.
-	StateSyncing metrics.Gauge
 
 	// Number of blockparts transmitted by peer.
 	BlockParts metrics.Counter
+
+	NewRoundProcessingTime  metrics.Gauge
+	ProposeProcessingTime   metrics.Gauge
+	PrevoteProcessingTime   metrics.Gauge
+	PrecommitProcessingTime metrics.Gauge
+	CommitProcessingTime    metrics.Gauge
 }
 
 // PrometheusMetrics returns Metrics build using Prometheus client library.
@@ -138,12 +142,14 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Name:      "byzantine_validators_power",
 			Help:      "Total power of the byzantine validators.",
 		}, labels).With(labelsAndValues...),
-		BlockIntervalSeconds: prometheus.NewHistogramFrom(stdprometheus.HistogramOpts{
+
+		BlockIntervalSeconds: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "block_interval_seconds",
 			Help:      "Time between this and the last block.",
 		}, labels).With(labelsAndValues...),
+
 		NumTxs: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
@@ -174,18 +180,42 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Name:      "fast_syncing",
 			Help:      "Whether or not a node is fast syncing. 1 if yes, 0 if no.",
 		}, labels).With(labelsAndValues...),
-		StateSyncing: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: MetricsSubsystem,
-			Name:      "state_syncing",
-			Help:      "Whether or not a node is state syncing. 1 if yes, 0 if no.",
-		}, labels).With(labelsAndValues...),
 		BlockParts: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
 			Name:      "block_parts",
 			Help:      "Number of blockparts transmitted by peer.",
 		}, append(labels, "peer_id")).With(labelsAndValues...),
+		NewRoundProcessingTime: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "new_round_processing_time",
+			Help:      "Time about new round",
+		}, labels).With(labelsAndValues...),
+		ProposeProcessingTime: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "propose_processing_time",
+			Help:      "Time about propose",
+		}, labels).With(labelsAndValues...),
+		PrevoteProcessingTime: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "prevote_processing_time",
+			Help:      "Time about prevote",
+		}, labels).With(labelsAndValues...),
+		PrecommitProcessingTime: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "precommit_processing_time",
+			Help:      "Time about precommit",
+		}, labels).With(labelsAndValues...),
+		CommitProcessingTime: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "commit_processing_time",
+			Help:      "Time about commit",
+		}, labels).With(labelsAndValues...),
 	}
 }
 
@@ -207,14 +237,19 @@ func NopMetrics() *Metrics {
 		ByzantineValidators:      discard.NewGauge(),
 		ByzantineValidatorsPower: discard.NewGauge(),
 
-		BlockIntervalSeconds: discard.NewHistogram(),
+		BlockIntervalSeconds: discard.NewGauge(),
 
 		NumTxs:          discard.NewGauge(),
 		BlockSizeBytes:  discard.NewGauge(),
 		TotalTxs:        discard.NewGauge(),
 		CommittedHeight: discard.NewGauge(),
 		FastSyncing:     discard.NewGauge(),
-		StateSyncing:    discard.NewGauge(),
 		BlockParts:      discard.NewCounter(),
+
+		NewRoundProcessingTime:  discard.NewGauge(),
+		ProposeProcessingTime:   discard.NewGauge(),
+		PrevoteProcessingTime:   discard.NewGauge(),
+		PrecommitProcessingTime: discard.NewGauge(),
+		CommitProcessingTime:    discard.NewGauge(),
 	}
 }

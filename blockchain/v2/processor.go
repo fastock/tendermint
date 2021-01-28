@@ -13,24 +13,15 @@ import (
 type pcBlockVerificationFailure struct {
 	priorityNormal
 	height       int64
-	firstPeerID  p2p.NodeID
-	secondPeerID p2p.NodeID
-}
-
-func (e pcBlockVerificationFailure) String() string {
-	return fmt.Sprintf("pcBlockVerificationFailure{%d 1st peer: %v, 2nd peer: %v}",
-		e.height, e.firstPeerID, e.secondPeerID)
+	firstPeerID  p2p.ID
+	secondPeerID p2p.ID
 }
 
 // successful block execution
 type pcBlockProcessed struct {
 	priorityNormal
 	height int64
-	peerID p2p.NodeID
-}
-
-func (e pcBlockProcessed) String() string {
-	return fmt.Sprintf("pcBlockProcessed{%d peer: %v}", e.height, e.peerID)
+	peerID p2p.ID
 }
 
 // processor has finished
@@ -46,7 +37,7 @@ func (p pcFinished) Error() string {
 
 type queueItem struct {
 	block  *types.Block
-	peerID p2p.NodeID
+	peerID p2p.ID
 }
 
 type blockQueue map[int64]queueItem
@@ -95,13 +86,10 @@ func (state *pcState) synced() bool {
 	return len(state.queue) <= 1
 }
 
-func (state *pcState) enqueue(peerID p2p.NodeID, block *types.Block, height int64) {
-	if item, ok := state.queue[height]; ok {
-		panic(fmt.Sprintf(
-			"duplicate block %d (%X) enqueued by processor (sent by %v; existing block %X from %v)",
-			height, block.Hash(), peerID, item.block.Hash(), item.peerID))
+func (state *pcState) enqueue(peerID p2p.ID, block *types.Block, height int64) {
+	if _, ok := state.queue[height]; ok {
+		panic("duplicate block enqueued by processor")
 	}
-
 	state.queue[height] = queueItem{block: block, peerID: peerID}
 }
 
@@ -110,7 +98,7 @@ func (state *pcState) height() int64 {
 }
 
 // purgePeer moves all unprocessed blocks from the queue
-func (state *pcState) purgePeer(peerID p2p.NodeID) {
+func (state *pcState) purgePeer(peerID p2p.ID) {
 	// what if height is less than state.height?
 	for height, item := range state.queue {
 		if item.peerID == peerID {
@@ -122,10 +110,6 @@ func (state *pcState) purgePeer(peerID p2p.NodeID) {
 // handle processes FSM events
 func (state *pcState) handle(event Event) (Event, error) {
 	switch event := event.(type) {
-	case bcResetState:
-		state.context.setState(event.state)
-		return noOp, nil
-
 	case scFinishedEv:
 		if state.synced() {
 			return pcFinished{tmState: state.context.tmState(), blocksSynced: state.blocksSynced}, nil
@@ -157,20 +141,16 @@ func (state *pcState) handle(event Event) (Event, error) {
 			}
 			return noOp, nil
 		}
+		first, second := firstItem.block, secondItem.block
 
-		var (
-			first, second = firstItem.block, secondItem.block
-			firstParts    = first.MakePartSet(types.BlockPartSizeBytes)
-			firstID       = types.BlockID{Hash: first.Hash(), PartSetHeader: firstParts.Header()}
-		)
+		firstParts := first.MakePartSet(types.BlockPartSizeBytes)
+		firstPartsHeader := firstParts.Header()
+		firstID := types.BlockID{Hash: first.Hash(), PartsHeader: firstPartsHeader}
 
-		// verify if +second+ last commit "confirms" +first+ block
 		err = state.context.verifyCommit(tmState.ChainID, firstID, first.Height, second.LastCommit)
 		if err != nil {
 			state.purgePeer(firstItem.peerID)
-			if firstItem.peerID != secondItem.peerID {
-				state.purgePeer(secondItem.peerID)
-			}
+			state.purgePeer(secondItem.peerID)
 			return pcBlockVerificationFailure{
 					height: first.Height, firstPeerID: firstItem.peerID, secondPeerID: secondItem.peerID},
 				nil
@@ -186,6 +166,7 @@ func (state *pcState) handle(event Event) (Event, error) {
 		state.blocksSynced++
 
 		return pcBlockProcessed{height: first.Height, peerID: firstItem.peerID}, nil
+
 	}
 
 	return noOp, nil

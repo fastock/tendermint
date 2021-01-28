@@ -1,10 +1,3 @@
----
-title: Tendermint Core Documentation
-description: Tendermint Core is a blockchain application platform.
-footer:
-  newsletter: false
----
-
 # Tendermint
 
 Welcome to the Tendermint Core documentation!
@@ -30,4 +23,5 @@ To find out about the Tendermint ecosystem you can go [here](https://github.com/
 
 ## Contribute
 
-To contribute to the documentation, see [this file](https://github.com/tendermint/tendermint/blob/master/docs/DOCS_README.md) for details of the build process and considerations when making changes.
+To contribute to the documentation, see [this file](https://github.com/tendermint/tendermint/blob/master/docs/DOCS_README.md) for details of the build process and
+considerations when making changes.

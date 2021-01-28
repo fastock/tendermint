@@ -5,20 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/tendermint/tendermint/crypto/tmhash"
-	"github.com/tendermint/tendermint/libs/protoio"
-	tmrand "github.com/tendermint/tendermint/libs/rand"
-	tmproto "github.com/tendermint/tendermint/proto/tendermint/types"
 )
 
-var (
-	testProposal *Proposal
-	pbp          *tmproto.Proposal
-)
+var testProposal *Proposal
 
 func init() {
 	var stamp, err = time.Parse(TimeFormat, "2018-02-11T07:09:22.765Z")
@@ -26,29 +19,26 @@ func init() {
 		panic(err)
 	}
 	testProposal = &Proposal{
-		Height: 12345,
-		Round:  23456,
-		BlockID: BlockID{Hash: []byte("--June_15_2020_amino_was_removed"),
-			PartSetHeader: PartSetHeader{Total: 111, Hash: []byte("--June_15_2020_amino_was_removed")}},
+		Height:    12345,
+		Round:     23456,
+		BlockID:   BlockID{[]byte{1, 2, 3}, PartSetHeader{111, []byte("blockparts")}},
 		POLRound:  -1,
 		Timestamp: stamp,
 	}
-	pbp = testProposal.ToProto()
 }
 
 func TestProposalSignable(t *testing.T) {
 	chainID := "test_chain_id"
-	signBytes := ProposalSignBytes(chainID, pbp)
-	pb := CanonicalizeProposal(chainID, pbp)
+	signBytes := testProposal.SignBytes(chainID)
 
-	expected, err := protoio.MarshalDelimited(&pb)
+	expected, err := cdc.MarshalBinaryLengthPrefixed(CanonicalizeProposal(chainID, testProposal))
 	require.NoError(t, err)
 	require.Equal(t, expected, signBytes, "Got unexpected sign bytes for Proposal")
 }
 
 func TestProposalString(t *testing.T) {
 	str := testProposal.String()
-	expected := `Proposal{12345/23456 (2D2D4A756E655F31355F323032305F616D696E6F5F7761735F72656D6F766564:111:2D2D4A756E65, -1) 000000000000 @ 2018-02-11T07:09:22.765Z}` //nolint:lll // ignore line length for tests
+	expected := `Proposal{12345/23456 (010203:111:626C6F636B70, -1) 000000000000 @ 2018-02-11T07:09:22.765Z}`
 	if str != expected {
 		t.Errorf("got unexpected string for Proposal. Expected:\n%v\nGot:\n%v", expected, str)
 	}
@@ -61,49 +51,41 @@ func TestProposalVerifySignature(t *testing.T) {
 
 	prop := NewProposal(
 		4, 2, 2,
-		BlockID{tmrand.Bytes(tmhash.Size), PartSetHeader{777, tmrand.Bytes(tmhash.Size)}})
-	p := prop.ToProto()
-	signBytes := ProposalSignBytes("test_chain_id", p)
+		BlockID{[]byte{1, 2, 3}, PartSetHeader{777, []byte("proper")}})
+	signBytes := prop.SignBytes("test_chain_id")
 
 	// sign it
-	err = privVal.SignProposal("test_chain_id", p)
+	err = privVal.SignProposal("test_chain_id", prop)
 	require.NoError(t, err)
-	prop.Signature = p.Signature
 
 	// verify the same proposal
-	valid := pubKey.VerifySignature(signBytes, prop.Signature)
+	valid := pubKey.VerifyBytes(signBytes, prop.Signature)
 	require.True(t, valid)
 
 	// serialize, deserialize and verify again....
-	newProp := new(tmproto.Proposal)
-	pb := prop.ToProto()
-
-	bs, err := proto.Marshal(pb)
+	newProp := new(Proposal)
+	bs, err := cdc.MarshalBinaryLengthPrefixed(prop)
 	require.NoError(t, err)
-
-	err = proto.Unmarshal(bs, newProp)
-	require.NoError(t, err)
-
-	np, err := ProposalFromProto(newProp)
+	err = cdc.UnmarshalBinaryLengthPrefixed(bs, &newProp)
 	require.NoError(t, err)
 
 	// verify the transmitted proposal
-	newSignBytes := ProposalSignBytes("test_chain_id", pb)
+	newSignBytes := newProp.SignBytes("test_chain_id")
 	require.Equal(t, string(signBytes), string(newSignBytes))
-	valid = pubKey.VerifySignature(newSignBytes, np.Signature)
+	valid = pubKey.VerifyBytes(newSignBytes, newProp.Signature)
 	require.True(t, valid)
 }
 
 func BenchmarkProposalWriteSignBytes(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		ProposalSignBytes("test_chain_id", pbp)
+		testProposal.SignBytes("test_chain_id")
 	}
 }
 
 func BenchmarkProposalSign(b *testing.B) {
 	privVal := NewMockPV()
 	for i := 0; i < b.N; i++ {
-		err := privVal.SignProposal("test_chain_id", pbp)
+		err := privVal.SignProposal("test_chain_id", testProposal)
 		if err != nil {
 			b.Error(err)
 		}
@@ -112,13 +94,13 @@ func BenchmarkProposalSign(b *testing.B) {
 
 func BenchmarkProposalVerifySignature(b *testing.B) {
 	privVal := NewMockPV()
-	err := privVal.SignProposal("test_chain_id", pbp)
+	err := privVal.SignProposal("test_chain_id", testProposal)
 	require.NoError(b, err)
 	pubKey, err := privVal.GetPubKey()
 	require.NoError(b, err)
 
 	for i := 0; i < b.N; i++ {
-		pubKey.VerifySignature(ProposalSignBytes("test_chain_id", pbp), testProposal.Signature)
+		pubKey.VerifyBytes(testProposal.SignBytes("test_chain_id"), testProposal.Signature)
 	}
 }
 
@@ -131,7 +113,7 @@ func TestProposalValidateBasic(t *testing.T) {
 		expectErr        bool
 	}{
 		{"Good Proposal", func(p *Proposal) {}, false},
-		{"Invalid Type", func(p *Proposal) { p.Type = tmproto.PrecommitType }, true},
+		{"Invalid Type", func(p *Proposal) { p.Type = PrecommitType }, true},
 		{"Invalid Height", func(p *Proposal) { p.Height = -1 }, true},
 		{"Invalid Round", func(p *Proposal) { p.Round = -1 }, true},
 		{"Invalid POLRound", func(p *Proposal) { p.POLRound = -2 }, true},
@@ -145,7 +127,7 @@ func TestProposalValidateBasic(t *testing.T) {
 			p.Signature = make([]byte, MaxSignatureSize+1)
 		}, true},
 	}
-	blockID := makeBlockID(tmhash.Sum([]byte("blockhash")), math.MaxInt32, tmhash.Sum([]byte("partshash")))
+	blockID := makeBlockID(tmhash.Sum([]byte("blockhash")), math.MaxInt64, tmhash.Sum([]byte("partshash")))
 
 	for _, tc := range testCases {
 		tc := tc
@@ -153,9 +135,7 @@ func TestProposalValidateBasic(t *testing.T) {
 			prop := NewProposal(
 				4, 2, 2,
 				blockID)
-			p := prop.ToProto()
-			err := privVal.SignProposal("test_chain_id", p)
-			prop.Signature = p.Signature
+			err := privVal.SignProposal("test_chain_id", prop)
 			require.NoError(t, err)
 			tc.malleateProposal(prop)
 			assert.Equal(t, tc.expectErr, prop.ValidateBasic() != nil, "Validate Basic had an unexpected result")

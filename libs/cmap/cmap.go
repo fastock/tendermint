@@ -1,13 +1,11 @@
 package cmap
 
-import (
-	tmsync "github.com/tendermint/tendermint/libs/sync"
-)
+import "sync"
 
 // CMap is a goroutine-safe map
 type CMap struct {
 	m map[string]interface{}
-	l tmsync.Mutex
+	l sync.Mutex
 }
 
 func NewCMap() *CMap {

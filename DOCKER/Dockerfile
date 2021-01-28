@@ -1,14 +1,4 @@
-# stage 1 Generate Tendermint Binary
-FROM golang:1.15-alpine as builder
-RUN apk update && \
-    apk upgrade && \
-    apk --no-cache add make
-COPY / /tendermint
-WORKDIR /tendermint
-RUN make build-linux
-
-# stage 2
-FROM golang:1.15-alpine
+FROM alpine:3.9
 LABEL maintainer="hello@tendermint.com"
 
 # Tendermint will be looking for the genesis file in /tendermint/config/genesis.json
@@ -37,20 +27,28 @@ WORKDIR $TMHOME
 # p2p, rpc and prometheus port
 EXPOSE 26656 26657 26660
 
+ENTRYPOINT ["/usr/bin/tendermint"]
+CMD ["node"]
 STOPSIGNAL SIGTERM
 
-COPY --from=builder /tendermint/build/tendermint /usr/bin/tendermint
+ARG BINARY=tendermint
+COPY $BINARY /usr/bin/tendermint
 
-# You can overwrite these before the first run to influence
-# config.json and genesis.json. Additionally, you can override
-# CMD to add parameters to `tendermint node`.
-ENV PROXY_APP=kvstore MONIKER=dockernode CHAIN_ID=dockerchain
-
-COPY ./DOCKER/docker-entrypoint.sh /usr/local/bin/
-
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["start"]
+# Create default configuration for docker run.
+RUN /usr/bin/tendermint init && \
+    sed -i \
+      -e 's/^proxy_app\s*=.*/proxy_app = "kvstore"/' \
+      -e 's/^moniker\s*=.*/moniker = "dockernode"/' \
+      -e 's/^addr_book_strict\s*=.*/addr_book_strict = false/' \
+      -e 's/^timeout_commit\s*=.*/timeout_commit = "500ms"/' \
+      -e 's/^index_all_tags\s*=.*/index_all_tags = true/' \
+      -e 's,^laddr = "tcp://127.0.0.1:26657",laddr = "tcp://0.0.0.0:26657",' \
+      -e 's/^prometheus\s*=.*/prometheus = true/' \
+      $TMHOME/config/config.toml && \
+    sed -i \
+      -e 's/^\s*"chain_id":.*/  "chain_id": "dockerchain",/' \
+      $TMHOME/config/genesis.json
 
 # Expose the data directory as a volume since there's mutable state in there
-VOLUME [ "$TMHOME" ]
+VOLUME [ $TMHOME ]
 

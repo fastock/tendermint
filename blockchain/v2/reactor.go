@@ -3,24 +3,120 @@ package v2
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
-	proto "github.com/gogo/protobuf/proto"
+	"github.com/tendermint/go-amino"
 
 	"github.com/tendermint/tendermint/behaviour"
-	bc "github.com/tendermint/tendermint/blockchain"
 	"github.com/tendermint/tendermint/libs/log"
-	tmsync "github.com/tendermint/tendermint/libs/sync"
 	"github.com/tendermint/tendermint/p2p"
-	bcproto "github.com/tendermint/tendermint/proto/tendermint/blockchain"
 	"github.com/tendermint/tendermint/state"
 	"github.com/tendermint/tendermint/types"
 )
 
-const (
-	// chBufferSize is the buffer size of all event channels.
-	chBufferSize int = 1000
-)
+//-------------------------------------
+
+type bcBlockRequestMessage struct {
+	Height int64
+}
+
+// ValidateBasic performs basic validation.
+func (m *bcBlockRequestMessage) ValidateBasic() error {
+	if m.Height < 0 {
+		return errors.New("negative Height")
+	}
+	return nil
+}
+
+func (m *bcBlockRequestMessage) String() string {
+	return fmt.Sprintf("[bcBlockRequestMessage %v]", m.Height)
+}
+
+type bcNoBlockResponseMessage struct {
+	Height int64
+}
+
+// ValidateBasic performs basic validation.
+func (m *bcNoBlockResponseMessage) ValidateBasic() error {
+	if m.Height < 0 {
+		return errors.New("negative Height")
+	}
+	return nil
+}
+
+func (m *bcNoBlockResponseMessage) String() string {
+	return fmt.Sprintf("[bcNoBlockResponseMessage %d]", m.Height)
+}
+
+//-------------------------------------
+
+type bcBlockResponseMessage struct {
+	Block *types.Block
+}
+
+// ValidateBasic performs basic validation.
+func (m *bcBlockResponseMessage) ValidateBasic() error {
+	if m.Block == nil {
+		return errors.New("block response message has nil block")
+	}
+
+	return m.Block.ValidateBasic()
+}
+
+func (m *bcBlockResponseMessage) String() string {
+	return fmt.Sprintf("[bcBlockResponseMessage %v]", m.Block.Height)
+}
+
+//-------------------------------------
+
+type bcStatusRequestMessage struct {
+	Height int64
+	Base   int64
+}
+
+// ValidateBasic performs basic validation.
+func (m *bcStatusRequestMessage) ValidateBasic() error {
+	if m.Base < 0 {
+		return errors.New("negative Base")
+	}
+	if m.Height < 0 {
+		return errors.New("negative Height")
+	}
+	if m.Base > m.Height {
+		return fmt.Errorf("base %v cannot be greater than height %v", m.Base, m.Height)
+	}
+	return nil
+}
+
+func (m *bcStatusRequestMessage) String() string {
+	return fmt.Sprintf("[bcStatusRequestMessage %v:%v]", m.Base, m.Height)
+}
+
+//-------------------------------------
+
+type bcStatusResponseMessage struct {
+	Height int64
+	Base   int64
+}
+
+// ValidateBasic performs basic validation.
+func (m *bcStatusResponseMessage) ValidateBasic() error {
+	if m.Base < 0 {
+		return errors.New("negative Base")
+	}
+	if m.Height < 0 {
+		return errors.New("negative Height")
+	}
+	if m.Base > m.Height {
+		return fmt.Errorf("base %v cannot be greater than height %v", m.Base, m.Height)
+	}
+	return nil
+}
+
+func (m *bcStatusResponseMessage) String() string {
+	return fmt.Sprintf("[bcStatusResponseMessage %v:%v]", m.Base, m.Height)
+}
 
 type blockStore interface {
 	LoadBlock(height int64) *types.Block
@@ -33,42 +129,45 @@ type blockStore interface {
 type BlockchainReactor struct {
 	p2p.BaseReactor
 
-	fastSync    bool // if true, enable fast sync on start
-	stateSynced bool // set to true when SwitchToFastSync is called by state sync
-	scheduler   *Routine
-	processor   *Routine
-	logger      log.Logger
+	fastSync  bool       // if true, enable fast sync on start
+	events    chan Event // XXX: Rename eventsFromPeers
+	scheduler *Routine
+	processor *Routine
+	logger    log.Logger
 
-	mtx           tmsync.RWMutex
+	mtx           sync.RWMutex
 	maxPeerHeight int64
 	syncHeight    int64
-	events        chan Event // non-nil during a fast sync
 
 	reporter behaviour.Reporter
 	io       iIO
 	store    blockStore
 }
 
+//nolint:unused,deadcode
+type blockVerifier interface {
+	VerifyCommit(chainID string, blockID types.BlockID, height int64, commit *types.Commit) error
+}
+
+//nolint:deadcode
 type blockApplier interface {
 	ApplyBlock(state state.State, blockID types.BlockID, block *types.Block) (state.State, int64, error)
 }
 
 // XXX: unify naming in this package around tmState
+// XXX: V1 stores a copy of state as initialState, which is never mutated. Is that nessesary?
 func newReactor(state state.State, store blockStore, reporter behaviour.Reporter,
-	blockApplier blockApplier, fastSync bool) *BlockchainReactor {
-	initHeight := state.LastBlockHeight + 1
-	if initHeight == 1 {
-		initHeight = state.InitialHeight
-	}
-	scheduler := newScheduler(initHeight, time.Now())
+	blockApplier blockApplier, bufferSize int, fastSync bool) *BlockchainReactor {
+	scheduler := newScheduler(state.LastBlockHeight, time.Now())
 	pContext := newProcessorContext(store, blockApplier, state)
 	// TODO: Fix naming to just newProcesssor
 	// newPcState requires a processorContext
 	processor := newPcState(pContext)
 
 	return &BlockchainReactor{
-		scheduler: newRoutine("scheduler", scheduler.handle, chBufferSize),
-		processor: newRoutine("processor", processor.handle, chBufferSize),
+		events:    make(chan Event, bufferSize),
+		scheduler: newRoutine("scheduler", scheduler.handle, bufferSize),
+		processor: newRoutine("processor", processor.handle, bufferSize),
 		store:     store,
 		reporter:  reporter,
 		logger:    log.NewNopLogger(),
@@ -83,7 +182,7 @@ func NewBlockchainReactor(
 	store blockStore,
 	fastSync bool) *BlockchainReactor {
 	reporter := behaviour.NewMockReporter()
-	return newReactor(state, store, reporter, blockApplier, fastSync)
+	return newReactor(state, store, reporter, blockApplier, 1000, fastSync)
 }
 
 // SetSwitch implements Reactor interface.
@@ -128,52 +227,11 @@ func (r *BlockchainReactor) SetLogger(logger log.Logger) {
 func (r *BlockchainReactor) Start() error {
 	r.reporter = behaviour.NewSwitchReporter(r.BaseReactor.Switch)
 	if r.fastSync {
-		err := r.startSync(nil)
-		if err != nil {
-			return fmt.Errorf("failed to start fast sync: %w", err)
-		}
+		go r.scheduler.start()
+		go r.processor.start()
+		go r.demux()
 	}
 	return nil
-}
-
-// startSync begins a fast sync, signalled by r.events being non-nil. If state is non-nil,
-// the scheduler and processor is updated with this state on startup.
-func (r *BlockchainReactor) startSync(state *state.State) error {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
-	if r.events != nil {
-		return errors.New("fast sync already in progress")
-	}
-	r.events = make(chan Event, chBufferSize)
-	go r.scheduler.start()
-	go r.processor.start()
-	if state != nil {
-		<-r.scheduler.ready()
-		<-r.processor.ready()
-		r.scheduler.send(bcResetState{state: *state})
-		r.processor.send(bcResetState{state: *state})
-	}
-	go r.demux(r.events)
-	return nil
-}
-
-// endSync ends a fast sync
-func (r *BlockchainReactor) endSync() {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
-	if r.events != nil {
-		close(r.events)
-	}
-	r.events = nil
-	r.scheduler.stop()
-	r.processor.stop()
-}
-
-// SwitchToFastSync is called by the state sync reactor when switching to fast sync.
-func (r *BlockchainReactor) SwitchToFastSync(state state.State) error {
-	r.stateSynced = true
-	state = state.Copy()
-	return r.startSync(&state)
 }
 
 // reactor generated ticker events:
@@ -184,7 +242,7 @@ type rTryPrunePeer struct {
 }
 
 func (e rTryPrunePeer) String() string {
-	return fmt.Sprintf("rTryPrunePeer{%v}", e.time)
+	return fmt.Sprintf(": %v", e.time)
 }
 
 // ticker event for scheduling block requests
@@ -194,7 +252,7 @@ type rTrySchedule struct {
 }
 
 func (e rTrySchedule) String() string {
-	return fmt.Sprintf("rTrySchedule{%v}", e.time)
+	return fmt.Sprintf(": %v", e.time)
 }
 
 // ticker for block processing
@@ -202,85 +260,47 @@ type rProcessBlock struct {
 	priorityNormal
 }
 
-func (e rProcessBlock) String() string {
-	return "rProcessBlock"
-}
-
 // reactor generated events based on blockchain related messages from peers:
 // blockResponse message received from a peer
 type bcBlockResponse struct {
 	priorityNormal
 	time   time.Time
-	peerID p2p.NodeID
+	peerID p2p.ID
 	size   int64
 	block  *types.Block
-}
-
-func (resp bcBlockResponse) String() string {
-	return fmt.Sprintf("bcBlockResponse{%d#%X (size: %d bytes) from %v at %v}",
-		resp.block.Height, resp.block.Hash(), resp.size, resp.peerID, resp.time)
 }
 
 // blockNoResponse message received from a peer
 type bcNoBlockResponse struct {
 	priorityNormal
 	time   time.Time
-	peerID p2p.NodeID
+	peerID p2p.ID
 	height int64
-}
-
-func (resp bcNoBlockResponse) String() string {
-	return fmt.Sprintf("bcNoBlockResponse{%v has no block at height %d at %v}",
-		resp.peerID, resp.height, resp.time)
 }
 
 // statusResponse message received from a peer
 type bcStatusResponse struct {
 	priorityNormal
 	time   time.Time
-	peerID p2p.NodeID
+	peerID p2p.ID
 	base   int64
 	height int64
-}
-
-func (resp bcStatusResponse) String() string {
-	return fmt.Sprintf("bcStatusResponse{%v is at height %d (base: %d) at %v}",
-		resp.peerID, resp.height, resp.base, resp.time)
 }
 
 // new peer is connected
 type bcAddNewPeer struct {
 	priorityNormal
-	peerID p2p.NodeID
-}
-
-func (resp bcAddNewPeer) String() string {
-	return fmt.Sprintf("bcAddNewPeer{%v}", resp.peerID)
+	peerID p2p.ID
 }
 
 // existing peer is removed
 type bcRemovePeer struct {
 	priorityHigh
-	peerID p2p.NodeID
+	peerID p2p.ID
 	reason interface{}
 }
 
-func (resp bcRemovePeer) String() string {
-	return fmt.Sprintf("bcRemovePeer{%v due to %v}", resp.peerID, resp.reason)
-}
-
-// resets the scheduler and processor state, e.g. following a switch from state syncing
-type bcResetState struct {
-	priorityHigh
-	state state.State
-}
-
-func (e bcResetState) String() string {
-	return fmt.Sprintf("bcResetState{%v}", e.state)
-}
-
-// Takes the channel as a parameter to avoid race conditions on r.events.
-func (r *BlockchainReactor) demux(events <-chan Event) {
+func (r *BlockchainReactor) demux() {
 	var lastRate = 0.0
 	var lastHundred = time.Now()
 
@@ -311,10 +331,6 @@ func (r *BlockchainReactor) demux(events <-chan Event) {
 		doStatusTk = time.NewTicker(statusFreq)
 	)
 	defer doStatusTk.Stop()
-	doStatusCh <- struct{}{} // immediately broadcast to get status of existing peers
-
-	// Memoize the scSchedulerFail error to avoid printing it every scheduleFreq.
-	var scSchedulerFailErr error
 
 	// XXX: Extract timers to make testing atemporal
 	for {
@@ -349,12 +365,10 @@ func (r *BlockchainReactor) demux(events <-chan Event) {
 		case <-doProcessBlockCh:
 			r.processor.send(rProcessBlock{})
 		case <-doStatusCh:
-			if err := r.io.broadcastStatusRequest(); err != nil {
-				r.logger.Error("Error broadcasting status request", "err", err)
-			}
+			r.io.broadcastStatusRequest(r.store.Base(), r.SyncHeight())
 
 		// Events from peers. Closing the channel signals event loop termination.
-		case event, ok := <-events:
+		case event, ok := <-r.events:
 			if !ok {
 				r.logger.Info("Stopping event processing")
 				return
@@ -366,45 +380,25 @@ func (r *BlockchainReactor) demux(events <-chan Event) {
 			case bcAddNewPeer, bcRemovePeer, bcBlockResponse, bcNoBlockResponse:
 				r.scheduler.send(event)
 			default:
-				r.logger.Error("Received unexpected event", "event", fmt.Sprintf("%T", event))
+				r.logger.Error("Received unknown event", "event", fmt.Sprintf("%T", event))
 			}
 
-		// Incremental events from scheduler
+		// Incremental events form scheduler
 		case event := <-r.scheduler.next():
 			switch event := event.(type) {
 			case scBlockReceived:
 				r.processor.send(event)
 			case scPeerError:
 				r.processor.send(event)
-				if err := r.reporter.Report(behaviour.BadMessage(event.peerID, "scPeerError")); err != nil {
-					r.logger.Error("Error reporting peer", "err", err)
-				}
+				r.reporter.Report(behaviour.BadMessage(event.peerID, "scPeerError"))
 			case scBlockRequest:
-				peer := r.Switch.Peers().Get(event.peerID)
-				if peer == nil {
-					r.logger.Error("Wanted to send block request, but no such peer", "peerID", event.peerID)
-					continue
-				}
-				if err := r.io.sendBlockRequest(peer, event.height); err != nil {
-					r.logger.Error("Error sending block request", "err", err)
-				}
+				r.io.sendBlockRequest(event.peerID, event.height)
 			case scFinishedEv:
 				r.processor.send(event)
 				r.scheduler.stop()
-			case scSchedulerFail:
-				if scSchedulerFailErr != event.reason {
-					r.logger.Error("Scheduler failure", "err", event.reason.Error())
-					scSchedulerFailErr = event.reason
-				}
-			case scPeersPruned:
-				// Remove peers from the processor.
-				for _, peerID := range event.peers {
-					r.processor.send(scPeerError{peerID: peerID, reason: errors.New("peer was pruned")})
-				}
-				r.logger.Debug("Pruned peers", "count", len(event.peers))
 			case noOpEvent:
 			default:
-				r.logger.Error("Received unexpected scheduler event", "event", fmt.Sprintf("%T", event))
+				r.logger.Error("Received unknown scheduler event", "event", fmt.Sprintf("%T", event))
 			}
 
 		// Incremental events from processor
@@ -414,7 +408,7 @@ func (r *BlockchainReactor) demux(events <-chan Event) {
 				r.setSyncHeight(event.height)
 				if r.syncHeight%100 == 0 {
 					lastRate = 0.9*lastRate + 0.1*(100/time.Since(lastHundred).Seconds())
-					r.logger.Info("Fast Sync Rate", "height", r.syncHeight,
+					r.logger.Info("Fast Syncc Rate", "height", r.syncHeight,
 						"max_peer_height", r.maxPeerHeight, "blocks/s", lastRate)
 					lastHundred = time.Now()
 				}
@@ -422,15 +416,11 @@ func (r *BlockchainReactor) demux(events <-chan Event) {
 			case pcBlockVerificationFailure:
 				r.scheduler.send(event)
 			case pcFinished:
-				r.logger.Info("Fast sync complete, switching to consensus")
-				if !r.io.trySwitchToConsensus(event.tmState, event.blocksSynced > 0 || r.stateSynced) {
-					r.logger.Error("Failed to switch to consensus reactor")
-				}
-				r.endSync()
-				return
+				r.io.trySwitchToConsensus(event.tmState, event.blocksSynced)
+				r.processor.stop()
 			case noOpEvent:
 			default:
-				r.logger.Error("Received unexpected processor event", "event", fmt.Sprintf("%T", event))
+				r.logger.Error("Received unknown processor event", "event", fmt.Sprintf("%T", event))
 			}
 
 		// Terminal event from scheduler
@@ -457,123 +447,117 @@ func (r *BlockchainReactor) demux(events <-chan Event) {
 // Stop implements cmn.Service interface.
 func (r *BlockchainReactor) Stop() error {
 	r.logger.Info("reactor stopping")
-	r.endSync()
+
+	r.scheduler.stop()
+	r.processor.stop()
+	close(r.events)
+
 	r.logger.Info("reactor stopped")
 	return nil
 }
 
+const (
+	// NOTE: keep up to date with bcBlockResponseMessage
+	bcBlockResponseMessagePrefixSize   = 4
+	bcBlockResponseMessageFieldKeySize = 1
+	maxMsgSize                         = types.MaxBlockSizeBytes +
+		bcBlockResponseMessagePrefixSize +
+		bcBlockResponseMessageFieldKeySize
+)
+
+// BlockchainMessage is a generic message for this reactor.
+type BlockchainMessage interface {
+	ValidateBasic() error
+}
+
+// RegisterBlockchainMessages registers the fast sync messages for amino encoding.
+func RegisterBlockchainMessages(cdc *amino.Codec) {
+	cdc.RegisterInterface((*BlockchainMessage)(nil), nil)
+	cdc.RegisterConcrete(&bcBlockRequestMessage{}, "tendermint/blockchain/BlockRequest", nil)
+	cdc.RegisterConcrete(&bcBlockResponseMessage{}, "tendermint/blockchain/BlockResponse", nil)
+	cdc.RegisterConcrete(&bcNoBlockResponseMessage{}, "tendermint/blockchain/NoBlockResponse", nil)
+	cdc.RegisterConcrete(&bcStatusResponseMessage{}, "tendermint/blockchain/StatusResponse", nil)
+	cdc.RegisterConcrete(&bcStatusRequestMessage{}, "tendermint/blockchain/StatusRequest", nil)
+}
+
+func decodeMsg(bz []byte) (msg BlockchainMessage, err error) {
+	if len(bz) > maxMsgSize {
+		return msg, fmt.Errorf("msg exceeds max size (%d > %d)", len(bz), maxMsgSize)
+	}
+	err = cdc.UnmarshalBinaryBare(bz, &msg)
+	return
+}
+
 // Receive implements Reactor by handling different message types.
-// XXX: do not call any methods that can block or incur heavy processing.
-// https://github.com/tendermint/tendermint/issues/2888
 func (r *BlockchainReactor) Receive(chID byte, src p2p.Peer, msgBytes []byte) {
-	logger := r.logger.With("src", src.ID(), "chID", chID)
-
-	msgProto := new(bcproto.Message)
-
-	if err := proto.Unmarshal(msgBytes, msgProto); err != nil {
-		logger.Error("error decoding message", "err", err)
+	msg, err := decodeMsg(msgBytes)
+	if err != nil {
+		r.logger.Error("error decoding message",
+			"src", src.ID(), "chId", chID, "msg", msg, "err", err, "bytes", msgBytes)
 		_ = r.reporter.Report(behaviour.BadMessage(src.ID(), err.Error()))
 		return
 	}
 
-	if err := msgProto.Validate(); err != nil {
-		logger.Error("peer sent us an invalid msg", "msg", msgProto, "err", err)
+	if err = msg.ValidateBasic(); err != nil {
+		r.logger.Error("peer sent us invalid msg", "peer", src, "msg", msg, "err", err)
 		_ = r.reporter.Report(behaviour.BadMessage(src.ID(), err.Error()))
 		return
 	}
 
-	r.logger.Debug("received", "msg", msgProto)
+	r.logger.Debug("Receive", "src", src.ID(), "chID", chID, "msg", msg)
 
-	switch msg := msgProto.Sum.(type) {
-	case *bcproto.Message_StatusRequest:
-		if err := r.io.sendStatusResponse(r.store.Base(), r.store.Height(), src); err != nil {
-			logger.Error("Could not send status message to src peer")
+	switch msg := msg.(type) {
+	case *bcStatusRequestMessage:
+		if err := r.io.sendStatusResponse(r.store.Height(), src.ID()); err != nil {
+			r.logger.Error("Could not send status message to peer", "src", src)
 		}
 
-	case *bcproto.Message_BlockRequest:
-		block := r.store.LoadBlock(msg.BlockRequest.Height)
+	case *bcBlockRequestMessage:
+		block := r.store.LoadBlock(msg.Height)
 		if block != nil {
-			if err := r.io.sendBlockToPeer(block, src); err != nil {
-				logger.Error("Could not send block message to src peer", "err", err)
+			if err = r.io.sendBlockToPeer(block, src.ID()); err != nil {
+				r.logger.Error("Could not send block message to peer: ", err)
 			}
 		} else {
-			logger.Info("peer asking for a block we don't have", "height", msg.BlockRequest.Height)
-			if err := r.io.sendBlockNotFound(msg.BlockRequest.Height, src); err != nil {
-				logger.Error("Couldn't send block not found msg", "err", err)
+			r.logger.Info("peer asking for a block we don't have", "src", src, "height", msg.Height)
+			peerID := src.ID()
+			if err = r.io.sendBlockNotFound(msg.Height, peerID); err != nil {
+				r.logger.Error("Couldn't send block not found: ", err)
 			}
 		}
 
-	case *bcproto.Message_StatusResponse:
-		r.mtx.RLock()
-		if r.events != nil {
-			r.events <- bcStatusResponse{
-				peerID: src.ID(),
-				base:   msg.StatusResponse.Base,
-				height: msg.StatusResponse.Height,
-			}
-		}
-		r.mtx.RUnlock()
+	case *bcStatusResponseMessage:
+		r.events <- bcStatusResponse{peerID: src.ID(), base: msg.Base, height: msg.Height}
 
-	case *bcproto.Message_BlockResponse:
-		bi, err := types.BlockFromProto(msg.BlockResponse.Block)
-		if err != nil {
-			logger.Error("error transitioning block from protobuf", "err", err)
-			_ = r.reporter.Report(behaviour.BadMessage(src.ID(), err.Error()))
-			return
+	case *bcBlockResponseMessage:
+		r.events <- bcBlockResponse{
+			peerID: src.ID(),
+			block:  msg.Block,
+			size:   int64(len(msgBytes)),
+			time:   time.Now(),
 		}
-		r.mtx.RLock()
-		if r.events != nil {
-			r.events <- bcBlockResponse{
-				peerID: src.ID(),
-				block:  bi,
-				size:   int64(len(msgBytes)),
-				time:   time.Now(),
-			}
-		}
-		r.mtx.RUnlock()
 
-	case *bcproto.Message_NoBlockResponse:
-		r.mtx.RLock()
-		if r.events != nil {
-			r.events <- bcNoBlockResponse{
-				peerID: src.ID(),
-				height: msg.NoBlockResponse.Height,
-				time:   time.Now(),
-			}
-		}
-		r.mtx.RUnlock()
+	case *bcNoBlockResponseMessage:
+		r.events <- bcNoBlockResponse{peerID: src.ID(), height: msg.Height, time: time.Now()}
 	}
 }
 
 // AddPeer implements Reactor interface
 func (r *BlockchainReactor) AddPeer(peer p2p.Peer) {
-	err := r.io.sendStatusResponse(r.store.Base(), r.store.Height(), peer)
+	err := r.io.sendStatusResponse(r.store.Height(), peer.ID())
 	if err != nil {
-		r.logger.Error("could not send our status to the new peer", "peer", peer.ID, "err", err)
+		r.logger.Error("Could not send status message to peer new", "src", peer.ID, "height", r.SyncHeight())
 	}
-
-	err = r.io.sendStatusRequest(peer)
-	if err != nil {
-		r.logger.Error("could not send status request to the new peer", "peer", peer.ID, "err", err)
-	}
-
-	r.mtx.RLock()
-	defer r.mtx.RUnlock()
-	if r.events != nil {
-		r.events <- bcAddNewPeer{peerID: peer.ID()}
-	}
+	r.events <- bcAddNewPeer{peerID: peer.ID()}
 }
 
 // RemovePeer implements Reactor interface.
 func (r *BlockchainReactor) RemovePeer(peer p2p.Peer, reason interface{}) {
-	r.mtx.RLock()
-	defer r.mtx.RUnlock()
-	if r.events != nil {
-		r.events <- bcRemovePeer{
-			peerID: peer.ID(),
-			reason: reason,
-		}
+	event := bcRemovePeer{
+		peerID: peer.ID(),
+		reason: reason,
 	}
+	r.events <- event
 }
 
 // GetChannels implements Reactor
@@ -581,10 +565,10 @@ func (r *BlockchainReactor) GetChannels() []*p2p.ChannelDescriptor {
 	return []*p2p.ChannelDescriptor{
 		{
 			ID:                  BlockchainChannel,
-			Priority:            5,
+			Priority:            10,
 			SendQueueCapacity:   2000,
 			RecvBufferCapacity:  50 * 4096,
-			RecvMessageCapacity: bc.MaxMsgSize,
+			RecvMessageCapacity: maxMsgSize,
 		},
 	}
 }

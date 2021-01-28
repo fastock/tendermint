@@ -17,7 +17,7 @@ import (
 	"github.com/tendermint/tendermint/types"
 )
 
-var waitForEventTimeout = 8 * time.Second
+var waitForEventTimeout = 5 * time.Second
 
 // MakeTxKV returns a text transaction, allong with expected key, value pair
 func MakeTxKV() ([]byte, []byte, []byte) {
@@ -28,18 +28,14 @@ func MakeTxKV() ([]byte, []byte, []byte) {
 
 func TestHeaderEvents(t *testing.T) {
 	for i, c := range GetClients() {
-		i, c := i, c
+		i, c := i, c // capture params
 		t.Run(reflect.TypeOf(c).String(), func(t *testing.T) {
 			// start for this test it if it wasn't already running
 			if !c.IsRunning() {
 				// if so, then we start it, listen, and stop it.
 				err := c.Start()
 				require.Nil(t, err, "%d: %+v", i, err)
-				t.Cleanup(func() {
-					if err := c.Stop(); err != nil {
-						t.Error(err)
-					}
-				})
+				defer c.Stop()
 			}
 
 			evtTyp := types.EventNewBlockHeader
@@ -52,47 +48,35 @@ func TestHeaderEvents(t *testing.T) {
 	}
 }
 
-// subscribe to new blocks and make sure height increments by 1
 func TestBlockEvents(t *testing.T) {
-	for _, c := range GetClients() {
-		c := c
+	for i, c := range GetClients() {
+		i, c := i, c // capture params
 		t.Run(reflect.TypeOf(c).String(), func(t *testing.T) {
 
 			// start for this test it if it wasn't already running
 			if !c.IsRunning() {
 				// if so, then we start it, listen, and stop it.
 				err := c.Start()
-				require.Nil(t, err)
-				t.Cleanup(func() {
-					if err := c.Stop(); err != nil {
-						t.Error(err)
-					}
-				})
+				require.Nil(t, err, "%d: %+v", i, err)
+				defer c.Stop()
 			}
 
-			const subscriber = "TestBlockEvents"
-
-			eventCh, err := c.Subscribe(context.Background(), subscriber, types.QueryForEvent(types.EventNewBlock).String())
-			require.NoError(t, err)
-			t.Cleanup(func() {
-				if err := c.UnsubscribeAll(context.Background(), subscriber); err != nil {
-					t.Error(err)
-				}
-			})
-
+			// listen for a new block; ensure height increases by 1
 			var firstBlockHeight int64
-			for i := int64(0); i < 3; i++ {
-				event := <-eventCh
-				blockEvent, ok := event.Data.(types.EventDataNewBlock)
-				require.True(t, ok)
+			for j := 0; j < 3; j++ {
+				evtTyp := types.EventNewBlock
+				evt, err := client.WaitForOneEvent(c, evtTyp, waitForEventTimeout)
+				require.Nil(t, err, "%d: %+v", j, err)
+				blockEvent, ok := evt.(types.EventDataNewBlock)
+				require.True(t, ok, "%d: %#v", j, evt)
 
 				block := blockEvent.Block
-
-				if firstBlockHeight == 0 {
+				if j == 0 {
 					firstBlockHeight = block.Header.Height
+					continue
 				}
 
-				require.Equal(t, firstBlockHeight+i, block.Header.Height)
+				require.Equal(t, block.Header.Height, firstBlockHeight+int64(j))
 			}
 		})
 	}
@@ -102,53 +86,45 @@ func TestTxEventsSentWithBroadcastTxAsync(t *testing.T) { testTxEventsSent(t, "a
 func TestTxEventsSentWithBroadcastTxSync(t *testing.T)  { testTxEventsSent(t, "sync") }
 
 func testTxEventsSent(t *testing.T, broadcastMethod string) {
-	for _, c := range GetClients() {
-		c := c
+	for i, c := range GetClients() {
+		i, c := i, c // capture params
 		t.Run(reflect.TypeOf(c).String(), func(t *testing.T) {
 
 			// start for this test it if it wasn't already running
 			if !c.IsRunning() {
 				// if so, then we start it, listen, and stop it.
 				err := c.Start()
-				require.Nil(t, err)
-				t.Cleanup(func() {
-					if err := c.Stop(); err != nil {
-						t.Error(err)
-					}
-				})
+				require.Nil(t, err, "%d: %+v", i, err)
+				defer c.Stop()
 			}
 
 			// make the tx
 			_, _, tx := MakeTxKV()
+			evtTyp := types.EventTx
 
 			// send
-			go func() {
-				var (
-					txres *ctypes.ResultBroadcastTx
-					err   error
-					ctx   = context.Background()
-				)
-				switch broadcastMethod {
-				case "async":
-					txres, err = c.BroadcastTxAsync(ctx, tx)
-				case "sync":
-					txres, err = c.BroadcastTxSync(ctx, tx)
-				default:
-					panic(fmt.Sprintf("Unknown broadcastMethod %s", broadcastMethod))
-				}
-				if assert.NoError(t, err) {
-					assert.Equal(t, txres.Code, abci.CodeTypeOK)
-				}
-			}()
+			var (
+				txres *ctypes.ResultBroadcastTx
+				err   error
+			)
+			switch broadcastMethod {
+			case "async":
+				txres, err = c.BroadcastTxAsync(tx)
+			case "sync":
+				txres, err = c.BroadcastTxSync(tx)
+			default:
+				panic(fmt.Sprintf("Unknown broadcastMethod %s", broadcastMethod))
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, txres.Code, abci.CodeTypeOK)
 
 			// and wait for confirmation
-			evt, err := client.WaitForOneEvent(c, types.EventTx, waitForEventTimeout)
-			require.Nil(t, err)
-
+			evt, err := client.WaitForOneEvent(c, evtTyp, waitForEventTimeout)
+			require.Nil(t, err, "%d: %+v", i, err)
 			// and make sure it has the proper info
 			txe, ok := evt.(types.EventDataTx)
-			require.True(t, ok)
-
+			require.True(t, ok, "%d: %#v", i, evt)
 			// make sure this is the proper tx
 			require.EqualValues(t, tx, txe.Tx)
 			require.True(t, txe.Result.IsOK())

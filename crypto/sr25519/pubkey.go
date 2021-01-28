@@ -10,28 +10,29 @@ import (
 	schnorrkel "github.com/ChainSafe/go-schnorrkel"
 )
 
-var _ crypto.PubKey = PubKey{}
+var _ crypto.PubKey = PubKeySr25519{}
 
-// PubKeySize is the number of bytes in an Sr25519 public key.
-const (
-	PubKeySize = 32
-	keyType    = "sr25519"
-)
+// PubKeySr25519Size is the number of bytes in an Sr25519 public key.
+const PubKeySr25519Size = 32
 
 // PubKeySr25519 implements crypto.PubKey for the Sr25519 signature scheme.
-type PubKey []byte
+type PubKeySr25519 [PubKeySr25519Size]byte
 
 // Address is the SHA256-20 of the raw pubkey bytes.
-func (pubKey PubKey) Address() crypto.Address {
+func (pubKey PubKeySr25519) Address() crypto.Address {
 	return crypto.Address(tmhash.SumTruncated(pubKey[:]))
 }
 
-// Bytes returns the byte representation of the PubKey.
-func (pubKey PubKey) Bytes() []byte {
-	return []byte(pubKey)
+// Bytes marshals the PubKey using amino encoding.
+func (pubKey PubKeySr25519) Bytes() []byte {
+	bz, err := cdc.MarshalBinaryBare(pubKey)
+	if err != nil {
+		panic(err)
+	}
+	return bz
 }
 
-func (pubKey PubKey) VerifySignature(msg []byte, sig []byte) bool {
+func (pubKey PubKeySr25519) VerifyBytes(msg []byte, sig []byte) bool {
 	// make sure we use the same algorithm to sign
 	if len(sig) != SignatureSize {
 		return false
@@ -40,9 +41,7 @@ func (pubKey PubKey) VerifySignature(msg []byte, sig []byte) bool {
 	copy(sig64[:], sig)
 
 	publicKey := &(schnorrkel.PublicKey{})
-	var p [PubKeySize]byte
-	copy(p[:], pubKey)
-	err := publicKey.Decode(p)
+	err := publicKey.Decode(pubKey)
 	if err != nil {
 		return false
 	}
@@ -58,20 +57,15 @@ func (pubKey PubKey) VerifySignature(msg []byte, sig []byte) bool {
 	return publicKey.Verify(signature, signingContext)
 }
 
-func (pubKey PubKey) String() string {
-	return fmt.Sprintf("PubKeySr25519{%X}", []byte(pubKey))
+func (pubKey PubKeySr25519) String() string {
+	return fmt.Sprintf("PubKeySr25519{%X}", pubKey[:])
 }
 
 // Equals - checks that two public keys are the same time
 // Runs in constant time based on length of the keys.
-func (pubKey PubKey) Equals(other crypto.PubKey) bool {
-	if otherEd, ok := other.(PubKey); ok {
+func (pubKey PubKeySr25519) Equals(other crypto.PubKey) bool {
+	if otherEd, ok := other.(PubKeySr25519); ok {
 		return bytes.Equal(pubKey[:], otherEd[:])
 	}
 	return false
-}
-
-func (pubKey PubKey) Type() string {
-	return keyType
-
 }

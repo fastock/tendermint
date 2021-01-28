@@ -1,8 +1,9 @@
 package core
 
 import (
-	"errors"
-	"strings"
+	"fmt"
+
+	"github.com/pkg/errors"
 
 	"github.com/tendermint/tendermint/p2p"
 	ctypes "github.com/tendermint/tendermint/rpc/core/types"
@@ -15,8 +16,12 @@ func NetInfo(ctx *rpctypes.Context) (*ctypes.ResultNetInfo, error) {
 	peersList := env.P2PPeers.Peers().List()
 	peers := make([]ctypes.Peer, 0, len(peersList))
 	for _, peer := range peersList {
+		nodeInfo, ok := peer.NodeInfo().(p2p.DefaultNodeInfo)
+		if !ok {
+			return nil, fmt.Errorf("peer.NodeInfo() is not DefaultNodeInfo")
+		}
 		peers = append(peers, ctypes.Peer{
-			NodeInfo:         peer.NodeInfo(),
+			NodeInfo:         nodeInfo,
 			IsOutbound:       peer.IsOutbound(),
 			ConnectionStatus: peer.Status(),
 			RemoteIP:         peer.RemoteIP().String(),
@@ -47,42 +52,19 @@ func UnsafeDialSeeds(ctx *rpctypes.Context, seeds []string) (*ctypes.ResultDialS
 
 // UnsafeDialPeers dials the given peers (comma-separated id@IP:PORT),
 // optionally making them persistent.
-func UnsafeDialPeers(ctx *rpctypes.Context, peers []string, persistent, unconditional, private bool) (
-	*ctypes.ResultDialPeers, error) {
+func UnsafeDialPeers(ctx *rpctypes.Context, peers []string, persistent bool) (*ctypes.ResultDialPeers, error) {
 	if len(peers) == 0 {
 		return &ctypes.ResultDialPeers{}, errors.New("no peers provided")
 	}
-
-	ids, err := getIDs(peers)
-	if err != nil {
-		return &ctypes.ResultDialPeers{}, err
-	}
-
-	env.Logger.Info("DialPeers", "peers", peers, "persistent",
-		persistent, "unconditional", unconditional, "private", private)
-
+	env.Logger.Info("DialPeers", "peers", peers, "persistent", persistent)
 	if persistent {
 		if err := env.P2PPeers.AddPersistentPeers(peers); err != nil {
 			return &ctypes.ResultDialPeers{}, err
 		}
 	}
-
-	if private {
-		if err := env.P2PPeers.AddPrivatePeerIDs(ids); err != nil {
-			return &ctypes.ResultDialPeers{}, err
-		}
-	}
-
-	if unconditional {
-		if err := env.P2PPeers.AddUnconditionalPeerIDs(ids); err != nil {
-			return &ctypes.ResultDialPeers{}, err
-		}
-	}
-
 	if err := env.P2PPeers.DialPeersAsync(peers); err != nil {
 		return &ctypes.ResultDialPeers{}, err
 	}
-
 	return &ctypes.ResultDialPeers{Log: "Dialing peers in progress. See /net_info for details"}, nil
 }
 
@@ -90,19 +72,4 @@ func UnsafeDialPeers(ctx *rpctypes.Context, peers []string, persistent, uncondit
 // More: https://docs.tendermint.com/master/rpc/#/Info/genesis
 func Genesis(ctx *rpctypes.Context) (*ctypes.ResultGenesis, error) {
 	return &ctypes.ResultGenesis{Genesis: env.GenDoc}, nil
-}
-
-func getIDs(peers []string) ([]string, error) {
-	ids := make([]string, 0, len(peers))
-
-	for _, peer := range peers {
-
-		spl := strings.Split(peer, "@")
-		if len(spl) != 2 {
-			return nil, p2p.ErrNetAddressNoID{Addr: peer}
-		}
-		ids = append(ids, spl[0])
-
-	}
-	return ids, nil
 }

@@ -1,13 +1,11 @@
 package abcicli
 
 import (
-	"context"
 	"fmt"
 	"sync"
 
 	"github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/libs/service"
-	tmsync "github.com/tendermint/tendermint/libs/sync"
 )
 
 const (
@@ -15,53 +13,40 @@ const (
 	echoRetryIntervalSeconds = 1
 )
 
-//go:generate mockery --case underscore --name Client
-
 // Client defines an interface for an ABCI client.
-//
-// All `Async` methods return a `ReqRes` object and an error.
+// All `Async` methods return a `ReqRes` object.
 // All `Sync` methods return the appropriate protobuf ResponseXxx struct and an error.
-//
-// NOTE these are client errors, eg. ABCI socket connectivity issues.
-// Application-related errors are reflected in response via ABCI error codes
-// and logs.
+// Note these are client errors, eg. ABCI socket connectivity issues.
+// Application-related errors are reflected in response via ABCI error codes and logs.
 type Client interface {
 	service.Service
 
 	SetResponseCallback(Callback)
 	Error() error
 
-	// Asynchronous requests
-	FlushAsync(context.Context) (*ReqRes, error)
-	EchoAsync(ctx context.Context, msg string) (*ReqRes, error)
-	InfoAsync(context.Context, types.RequestInfo) (*ReqRes, error)
-	DeliverTxAsync(context.Context, types.RequestDeliverTx) (*ReqRes, error)
-	CheckTxAsync(context.Context, types.RequestCheckTx) (*ReqRes, error)
-	QueryAsync(context.Context, types.RequestQuery) (*ReqRes, error)
-	CommitAsync(context.Context) (*ReqRes, error)
-	InitChainAsync(context.Context, types.RequestInitChain) (*ReqRes, error)
-	BeginBlockAsync(context.Context, types.RequestBeginBlock) (*ReqRes, error)
-	EndBlockAsync(context.Context, types.RequestEndBlock) (*ReqRes, error)
-	ListSnapshotsAsync(context.Context, types.RequestListSnapshots) (*ReqRes, error)
-	OfferSnapshotAsync(context.Context, types.RequestOfferSnapshot) (*ReqRes, error)
-	LoadSnapshotChunkAsync(context.Context, types.RequestLoadSnapshotChunk) (*ReqRes, error)
-	ApplySnapshotChunkAsync(context.Context, types.RequestApplySnapshotChunk) (*ReqRes, error)
+	FlushAsync() *ReqRes
+	EchoAsync(msg string) *ReqRes
+	InfoAsync(types.RequestInfo) *ReqRes
+	SetOptionAsync(types.RequestSetOption) *ReqRes
+	DeliverTxAsync(types.RequestDeliverTx) *ReqRes
+	CheckTxAsync(types.RequestCheckTx) *ReqRes
+	QueryAsync(types.RequestQuery) *ReqRes
+	CommitAsync() *ReqRes
+	InitChainAsync(types.RequestInitChain) *ReqRes
+	BeginBlockAsync(types.RequestBeginBlock) *ReqRes
+	EndBlockAsync(types.RequestEndBlock) *ReqRes
 
-	// Synchronous requests
-	FlushSync(context.Context) error
-	EchoSync(ctx context.Context, msg string) (*types.ResponseEcho, error)
-	InfoSync(context.Context, types.RequestInfo) (*types.ResponseInfo, error)
-	DeliverTxSync(context.Context, types.RequestDeliverTx) (*types.ResponseDeliverTx, error)
-	CheckTxSync(context.Context, types.RequestCheckTx) (*types.ResponseCheckTx, error)
-	QuerySync(context.Context, types.RequestQuery) (*types.ResponseQuery, error)
-	CommitSync(context.Context) (*types.ResponseCommit, error)
-	InitChainSync(context.Context, types.RequestInitChain) (*types.ResponseInitChain, error)
-	BeginBlockSync(context.Context, types.RequestBeginBlock) (*types.ResponseBeginBlock, error)
-	EndBlockSync(context.Context, types.RequestEndBlock) (*types.ResponseEndBlock, error)
-	ListSnapshotsSync(context.Context, types.RequestListSnapshots) (*types.ResponseListSnapshots, error)
-	OfferSnapshotSync(context.Context, types.RequestOfferSnapshot) (*types.ResponseOfferSnapshot, error)
-	LoadSnapshotChunkSync(context.Context, types.RequestLoadSnapshotChunk) (*types.ResponseLoadSnapshotChunk, error)
-	ApplySnapshotChunkSync(context.Context, types.RequestApplySnapshotChunk) (*types.ResponseApplySnapshotChunk, error)
+	FlushSync() error
+	EchoSync(msg string) (*types.ResponseEcho, error)
+	InfoSync(types.RequestInfo) (*types.ResponseInfo, error)
+	SetOptionSync(types.RequestSetOption) (*types.ResponseSetOption, error)
+	DeliverTxSync(types.RequestDeliverTx) (*types.ResponseDeliverTx, error)
+	CheckTxSync(types.RequestCheckTx) (*types.ResponseCheckTx, error)
+	QuerySync(types.RequestQuery) (*types.ResponseQuery, error)
+	CommitSync() (*types.ResponseCommit, error)
+	InitChainSync(types.RequestInitChain) (*types.ResponseInitChain, error)
+	BeginBlockSync(types.RequestBeginBlock) (*types.ResponseBeginBlock, error)
+	EndBlockSync(types.RequestEndBlock) (*types.ResponseEndBlock, error)
 }
 
 //----------------------------------------
@@ -91,7 +76,7 @@ type ReqRes struct {
 	*sync.WaitGroup
 	*types.Response // Not set atomically, so be sure to use WaitGroup.
 
-	mtx  tmsync.Mutex
+	mtx  sync.Mutex
 	done bool                  // Gets set to true once *after* WaitGroup.Done().
 	cb   func(*types.Response) // A single callback that may be set.
 }

@@ -2,8 +2,7 @@ package pubsub
 
 import (
 	"errors"
-
-	tmsync "github.com/tendermint/tendermint/libs/sync"
+	"sync"
 )
 
 var (
@@ -24,7 +23,7 @@ type Subscription struct {
 	out chan Message
 
 	cancelled chan struct{}
-	mtx       tmsync.RWMutex
+	mtx       sync.RWMutex
 	err       error
 }
 

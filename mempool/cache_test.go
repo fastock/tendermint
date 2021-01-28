@@ -20,8 +20,7 @@ func TestCacheRemove(t *testing.T) {
 	for i := 0; i < numTxs; i++ {
 		// probability of collision is 2**-256
 		txBytes := make([]byte, 32)
-		_, err := rand.Read(txBytes)
-		require.NoError(t, err)
+		rand.Read(txBytes) // nolint: gosec
 		txs[i] = txBytes
 		cache.Push(txBytes)
 		// make sure its added to both the linked list and the map
@@ -68,8 +67,7 @@ func TestCacheAfterUpdate(t *testing.T) {
 			tx := types.Tx{byte(v)}
 			updateTxs = append(updateTxs, tx)
 		}
-		err := mempool.Update(int64(tcIndex), updateTxs, abciResponses(len(updateTxs), abci.CodeTypeOK), nil, nil)
-		require.NoError(t, err)
+		mempool.Update(int64(tcIndex), updateTxs, abciResponses(len(updateTxs), abci.CodeTypeOK), nil, nil)
 
 		for _, v := range tc.reAddIndices {
 			tx := types.Tx{byte(v)}

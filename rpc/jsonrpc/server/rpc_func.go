@@ -1,10 +1,13 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
+
+	"github.com/pkg/errors"
+
+	amino "github.com/tendermint/go-amino"
 
 	"github.com/tendermint/tendermint/libs/log"
 )
@@ -13,17 +16,19 @@ import (
 // general jsonrpc and websocket handlers for all functions. "result" is the
 // interface on which the result objects are registered, and is popualted with
 // every RPCResponse
-func RegisterRPCFuncs(mux *http.ServeMux, funcMap map[string]*RPCFunc, logger log.Logger) {
+func RegisterRPCFuncs(mux *http.ServeMux, funcMap map[string]*RPCFunc, cdc *amino.Codec, logger log.Logger) {
 	// HTTP endpoints
 	for funcName, rpcFunc := range funcMap {
-		mux.HandleFunc("/"+funcName, makeHTTPHandler(rpcFunc, logger))
+		mux.HandleFunc("/"+funcName, makeHTTPHandler(rpcFunc, cdc, logger))
 	}
 
 	// JSONRPC endpoints
-	mux.HandleFunc("/", handleInvalidJSONRPCPaths(makeJSONRPCHandler(funcMap, logger)))
+	mux.HandleFunc("/", handleInvalidJSONRPCPaths(makeJSONRPCHandler(funcMap, cdc, logger)))
 }
 
+///////////////////////////////////////////////////////////////////////////////
 // Function introspection
+///////////////////////////////////////////////////////////////////////////////
 
 // RPCFunc contains the introspected type information for a function
 type RPCFunc struct {
@@ -87,7 +92,7 @@ func funcReturnTypes(f interface{}) []reflect.Type {
 func unreflectResult(returns []reflect.Value) (interface{}, error) {
 	errV := returns[1]
 	if errV.Interface() != nil {
-		return nil, fmt.Errorf("%v", errV.Interface())
+		return nil, errors.Errorf("%v", errV.Interface())
 	}
 	rv := returns[0]
 	// the result is a registered interface,

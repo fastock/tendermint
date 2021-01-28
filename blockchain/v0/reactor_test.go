@@ -1,85 +1,93 @@
 package v0
 
 import (
-	"fmt"
-	"math/rand"
 	"os"
+	"sort"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
+	"github.com/pkg/errors"
+	"github.com/stretchr/testify/assert"
+
+	dbm "github.com/tendermint/tm-db"
 
 	abci "github.com/tendermint/tendermint/abci/types"
 	cfg "github.com/tendermint/tendermint/config"
 	"github.com/tendermint/tendermint/libs/log"
-	"github.com/tendermint/tendermint/mempool/mock"
+	"github.com/tendermint/tendermint/mock"
 	"github.com/tendermint/tendermint/p2p"
-	bcproto "github.com/tendermint/tendermint/proto/tendermint/blockchain"
 	"github.com/tendermint/tendermint/proxy"
 	sm "github.com/tendermint/tendermint/state"
 	"github.com/tendermint/tendermint/store"
 	"github.com/tendermint/tendermint/types"
-	dbm "github.com/tendermint/tm-db"
+	tmtime "github.com/tendermint/tendermint/types/time"
 )
 
-var rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+var config *cfg.Config
 
-type reactorTestSuite struct {
-	reactor *Reactor
-	app     proxy.AppConns
+func randGenesisDoc(numValidators int, randPower bool, minPower int64) (*types.GenesisDoc, []types.PrivValidator) {
+	validators := make([]types.GenesisValidator, numValidators)
+	privValidators := make([]types.PrivValidator, numValidators)
+	for i := 0; i < numValidators; i++ {
+		val, privVal := types.RandValidator(randPower, minPower)
+		validators[i] = types.GenesisValidator{
+			PubKey: val.PubKey,
+			Power:  val.VotingPower,
+		}
+		privValidators[i] = privVal
+	}
+	sort.Sort(types.PrivValidatorsByAddress(privValidators))
 
-	peerID p2p.NodeID
-
-	blockchainChannel   *p2p.Channel
-	blockchainInCh      chan p2p.Envelope
-	blockchainOutCh     chan p2p.Envelope
-	blockchainPeerErrCh chan p2p.PeerError
-
-	peerUpdatesCh chan p2p.PeerUpdate
-	peerUpdates   *p2p.PeerUpdatesCh
+	return &types.GenesisDoc{
+		GenesisTime: tmtime.Now(),
+		ChainID:     config.ChainID(),
+		Validators:  validators,
+	}, privValidators
 }
 
-func setup(
-	t *testing.T,
+type BlockchainReactorPair struct {
+	reactor *BlockchainReactor
+	app     proxy.AppConns
+}
+
+func newBlockchainReactor(
+	logger log.Logger,
 	genDoc *types.GenesisDoc,
 	privVals []types.PrivValidator,
-	maxBlockHeight int64,
-	chBuf uint,
-) *reactorTestSuite {
-	t.Helper()
+	maxBlockHeight int64) BlockchainReactorPair {
+	if len(privVals) != 1 {
+		panic("only support one validator")
+	}
 
-	require.Len(t, privVals, 1, "only one validator can be supported")
-
-	app := &abci.BaseApplication{}
+	app := &testApp{}
 	cc := proxy.NewLocalClientCreator(app)
-
 	proxyApp := proxy.NewAppConns(cc)
-	require.NoError(t, proxyApp.Start())
+	err := proxyApp.Start()
+	if err != nil {
+		panic(errors.Wrap(err, "error start app"))
+	}
 
 	blockDB := dbm.NewMemDB()
 	stateDB := dbm.NewMemDB()
-	stateStore := sm.NewStore(stateDB)
 	blockStore := store.NewBlockStore(blockDB)
 
-	state, err := stateStore.LoadFromDBOrGenesisDoc(genDoc)
-	require.NoError(t, err)
+	state, err := sm.LoadStateFromDBOrGenesisDoc(stateDB, genDoc)
+	if err != nil {
+		panic(errors.Wrap(err, "error constructing state from genesis file"))
+	}
 
+	// Make the BlockchainReactor itself.
+	// NOTE we have to create and commit the blocks first because
+	// pool.height is determined from the store.
 	fastSync := true
 	db := dbm.NewMemDB()
-	stateStore = sm.NewStore(db)
+	blockExec := sm.NewBlockExecutor(db, log.TestingLogger(), proxyApp.Consensus(),
+		mock.Mempool{}, sm.MockEvidencePool{})
+	sm.SaveState(db, state)
 
-	blockExec := sm.NewBlockExecutor(
-		stateStore,
-		log.TestingLogger(),
-		proxyApp.Consensus(),
-		mock.Mempool{},
-		sm.EmptyEvidencePool{},
-	)
-	require.NoError(t, stateStore.Save(state))
-
+	// let's add some blocks in
 	for blockHeight := int64(1); blockHeight <= maxBlockHeight; blockHeight++ {
 		lastCommit := types.NewCommit(blockHeight-1, 0, types.BlockID{}, nil)
-
 		if blockHeight > 1 {
 			lastBlockMeta := blockStore.LoadBlockMeta(blockHeight - 1)
 			lastBlock := blockStore.LoadBlock(blockHeight - 1)
@@ -92,197 +100,58 @@ func setup(
 				lastBlock.Header.ChainID,
 				time.Now(),
 			)
-			require.NoError(t, err)
-
-			lastCommit = types.NewCommit(
-				vote.Height,
-				vote.Round,
-				lastBlockMeta.BlockID,
-				[]types.CommitSig{vote.CommitSig()},
-			)
+			if err != nil {
+				panic(err)
+			}
+			lastCommit = types.NewCommit(vote.Height, vote.Round,
+				lastBlockMeta.BlockID, []types.CommitSig{vote.CommitSig()})
 		}
 
 		thisBlock := makeBlock(blockHeight, state, lastCommit)
+
 		thisParts := thisBlock.MakePartSet(types.BlockPartSizeBytes)
-		blockID := types.BlockID{Hash: thisBlock.Hash(), PartSetHeader: thisParts.Header()}
+		blockID := types.BlockID{Hash: thisBlock.Hash(), PartsHeader: thisParts.Header()}
 
 		state, _, err = blockExec.ApplyBlock(state, blockID, thisBlock)
-		require.NoError(t, err)
+		if err != nil {
+			panic(errors.Wrap(err, "error apply block"))
+		}
 
 		blockStore.SaveBlock(thisBlock, thisParts, lastCommit)
 	}
 
-	pID := make([]byte, 16)
-	_, err = rng.Read(pID)
-	require.NoError(t, err)
+	bcReactor := NewBlockchainReactor(state.Copy(), blockExec, blockStore, fastSync)
+	bcReactor.SetLogger(logger.With("module", "blockchain"))
 
-	peerUpdatesCh := make(chan p2p.PeerUpdate, chBuf)
-
-	rts := &reactorTestSuite{
-		app:                 proxyApp,
-		blockchainInCh:      make(chan p2p.Envelope, chBuf),
-		blockchainOutCh:     make(chan p2p.Envelope, chBuf),
-		blockchainPeerErrCh: make(chan p2p.PeerError, chBuf),
-		peerUpdatesCh:       peerUpdatesCh,
-		peerUpdates:         p2p.NewPeerUpdates(peerUpdatesCh),
-		peerID:              p2p.NodeID(fmt.Sprintf("%x", pID)),
-	}
-
-	rts.blockchainChannel = p2p.NewChannel(
-		BlockchainChannel,
-		new(bcproto.Message),
-		rts.blockchainInCh,
-		rts.blockchainOutCh,
-		rts.blockchainPeerErrCh,
-	)
-
-	reactor, err := NewReactor(
-		log.TestingLogger().With("module", "blockchain", "node", rts.peerID),
-		state.Copy(),
-		blockExec,
-		blockStore,
-		nil,
-		rts.blockchainChannel,
-		rts.peerUpdates,
-		fastSync,
-	)
-
-	require.NoError(t, err)
-	rts.reactor = reactor
-
-	require.NoError(t, rts.reactor.Start())
-	require.True(t, rts.reactor.IsRunning())
-
-	t.Cleanup(func() {
-		require.NoError(t, rts.reactor.Stop())
-		require.NoError(t, rts.app.Stop())
-		require.False(t, rts.reactor.IsRunning())
-	})
-
-	return rts
+	return BlockchainReactorPair{bcReactor, proxyApp}
 }
 
-func simulateRouter(primary *reactorTestSuite, suites []*reactorTestSuite, dropChErr bool) {
-	// create a mapping for efficient suite lookup by peer ID
-	suitesByPeerID := make(map[p2p.NodeID]*reactorTestSuite)
-	for _, suite := range suites {
-		suitesByPeerID[suite.peerID] = suite
-	}
-
-	// Simulate a router by listening for all outbound envelopes and proxying the
-	// envelope to the respective peer (suite).
-	go func() {
-		for envelope := range primary.blockchainOutCh {
-			if envelope.Broadcast {
-				for _, s := range suites {
-					// broadcast to everyone except source
-					if s.peerID != primary.peerID {
-						s.blockchainInCh <- p2p.Envelope{
-							From:    primary.peerID,
-							To:      s.peerID,
-							Message: envelope.Message,
-						}
-					}
-				}
-			} else {
-				suitesByPeerID[envelope.To].blockchainInCh <- p2p.Envelope{
-					From:    primary.peerID,
-					To:      envelope.To,
-					Message: envelope.Message,
-				}
-			}
-		}
-	}()
-
-	go func() {
-		for pErr := range primary.blockchainPeerErrCh {
-			if dropChErr {
-				primary.reactor.Logger.Debug("dropped peer error", "err", pErr.Err)
-			} else {
-				primary.peerUpdatesCh <- p2p.PeerUpdate{
-					PeerID: pErr.PeerID,
-					Status: p2p.PeerStatusRemoved,
-				}
-			}
-		}
-	}()
-}
-
-func TestReactor_AbruptDisconnect(t *testing.T) {
-	config := cfg.ResetTestRoot("blockchain_reactor_test")
+func TestNoBlockResponse(t *testing.T) {
+	config = cfg.ResetTestRoot("blockchain_reactor_test")
 	defer os.RemoveAll(config.RootDir)
+	genDoc, privVals := randGenesisDoc(1, false, 30)
 
-	genDoc, privVals := randGenesisDoc(config, 1, false, 30)
-	maxBlockHeight := int64(64)
-	testSuites := []*reactorTestSuite{
-		setup(t, genDoc, privVals, maxBlockHeight, 0),
-		setup(t, genDoc, privVals, 0, 0),
-	}
-
-	require.Equal(t, maxBlockHeight, testSuites[0].reactor.store.Height())
-
-	for _, s := range testSuites {
-		simulateRouter(s, testSuites, true)
-
-		// connect reactor to every other reactor
-		for _, ss := range testSuites {
-			if s.peerID != ss.peerID {
-				s.peerUpdatesCh <- p2p.PeerUpdate{
-					Status: p2p.PeerStatusUp,
-					PeerID: ss.peerID,
-				}
-			}
-		}
-	}
-
-	secondaryPool := testSuites[1].reactor.pool
-	require.Eventually(
-		t,
-		func() bool {
-			height, _, _ := secondaryPool.GetStatus()
-			return secondaryPool.MaxPeerHeight() > 0 && height > 0 && height < 10
-		},
-		10*time.Second,
-		10*time.Millisecond,
-		"expected node to be partially synced",
-	)
-
-	// Remove synced node from the syncing node which should not result in any
-	// deadlocks or race conditions within the context of poolRoutine.
-	testSuites[1].peerUpdatesCh <- p2p.PeerUpdate{
-		Status: p2p.PeerStatusDown,
-		PeerID: testSuites[0].peerID,
-	}
-}
-
-func TestReactor_NoBlockResponse(t *testing.T) {
-	config := cfg.ResetTestRoot("blockchain_reactor_test")
-	defer os.RemoveAll(config.RootDir)
-
-	genDoc, privVals := randGenesisDoc(config, 1, false, 30)
 	maxBlockHeight := int64(65)
-	testSuites := []*reactorTestSuite{
-		setup(t, genDoc, privVals, maxBlockHeight, 0),
-		setup(t, genDoc, privVals, 0, 0),
-	}
 
-	require.Equal(t, maxBlockHeight, testSuites[0].reactor.store.Height())
+	reactorPairs := make([]BlockchainReactorPair, 2)
 
-	for _, s := range testSuites {
-		simulateRouter(s, testSuites, true)
+	reactorPairs[0] = newBlockchainReactor(log.TestingLogger(), genDoc, privVals, maxBlockHeight)
+	reactorPairs[1] = newBlockchainReactor(log.TestingLogger(), genDoc, privVals, 0)
 
-		// connect reactor to every other reactor
-		for _, ss := range testSuites {
-			if s.peerID != ss.peerID {
-				s.peerUpdatesCh <- p2p.PeerUpdate{
-					Status: p2p.PeerStatusUp,
-					PeerID: ss.peerID,
-				}
-			}
+	p2p.MakeConnectedSwitches(config.P2P, 2, func(i int, s *p2p.Switch) *p2p.Switch {
+		s.AddReactor("BLOCKCHAIN", reactorPairs[i].reactor)
+		return s
+
+	}, p2p.Connect2Switches)
+
+	defer func() {
+		for _, r := range reactorPairs {
+			r.reactor.Stop()
+			r.app.Stop()
 		}
-	}
+	}()
 
-	testCases := []struct {
+	tests := []struct {
 		height   int64
 		existent bool
 	}{
@@ -292,114 +161,227 @@ func TestReactor_NoBlockResponse(t *testing.T) {
 		{100, false},
 	}
 
-	secondaryPool := testSuites[1].reactor.pool
-	require.Eventually(
-		t,
-		func() bool { return secondaryPool.MaxPeerHeight() > 0 && secondaryPool.IsCaughtUp() },
-		10*time.Second,
-		10*time.Millisecond,
-		"expected node to be fully synced",
-	)
+	for {
+		if reactorPairs[1].reactor.pool.IsCaughtUp() {
+			break
+		}
 
-	for _, tc := range testCases {
-		block := testSuites[1].reactor.store.LoadBlock(tc.height)
-		if tc.existent {
-			require.True(t, block != nil)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	assert.Equal(t, maxBlockHeight, reactorPairs[0].reactor.store.Height())
+
+	for _, tt := range tests {
+		block := reactorPairs[1].reactor.store.LoadBlock(tt.height)
+		if tt.existent {
+			assert.True(t, block != nil)
 		} else {
-			require.Nil(t, block)
+			assert.True(t, block == nil)
 		}
 	}
 }
 
-func TestReactor_BadBlockStopsPeer(t *testing.T) {
-	config := cfg.ResetTestRoot("blockchain_reactor_test")
+// NOTE: This is too hard to test without
+// an easy way to add test peer to switch
+// or without significant refactoring of the module.
+// Alternatively we could actually dial a TCP conn but
+// that seems extreme.
+func TestBadBlockStopsPeer(t *testing.T) {
+	config = cfg.ResetTestRoot("blockchain_reactor_test")
 	defer os.RemoveAll(config.RootDir)
+	genDoc, privVals := randGenesisDoc(1, false, 30)
 
-	maxBlockHeight := int64(48)
-	genDoc, privVals := randGenesisDoc(config, 1, false, 30)
+	maxBlockHeight := int64(148)
 
-	testSuites := []*reactorTestSuite{
-		setup(t, genDoc, privVals, maxBlockHeight, 1000), // fully synced node
-		setup(t, genDoc, privVals, 0, 1000),
-		setup(t, genDoc, privVals, 0, 1000),
-		setup(t, genDoc, privVals, 0, 1000),
-		setup(t, genDoc, privVals, 0, 1000), // new node
-	}
+	otherChain := newBlockchainReactor(log.TestingLogger(), genDoc, privVals, maxBlockHeight)
+	defer func() {
+		otherChain.reactor.Stop()
+		otherChain.app.Stop()
+	}()
 
-	require.Equal(t, maxBlockHeight, testSuites[0].reactor.store.Height())
+	reactorPairs := make([]BlockchainReactorPair, 4)
 
-	for _, s := range testSuites[:len(testSuites)-1] {
-		simulateRouter(s, testSuites, true)
+	reactorPairs[0] = newBlockchainReactor(log.TestingLogger(), genDoc, privVals, maxBlockHeight)
+	reactorPairs[1] = newBlockchainReactor(log.TestingLogger(), genDoc, privVals, 0)
+	reactorPairs[2] = newBlockchainReactor(log.TestingLogger(), genDoc, privVals, 0)
+	reactorPairs[3] = newBlockchainReactor(log.TestingLogger(), genDoc, privVals, 0)
 
-		// connect reactor to every other reactor except the new node
-		for _, ss := range testSuites[:len(testSuites)-1] {
-			if s.peerID != ss.peerID {
-				s.peerUpdatesCh <- p2p.PeerUpdate{
-					Status: p2p.PeerStatusUp,
-					PeerID: ss.peerID,
-				}
-			}
+	switches := p2p.MakeConnectedSwitches(config.P2P, 4, func(i int, s *p2p.Switch) *p2p.Switch {
+		s.AddReactor("BLOCKCHAIN", reactorPairs[i].reactor)
+		return s
+
+	}, p2p.Connect2Switches)
+
+	defer func() {
+		for _, r := range reactorPairs {
+			r.reactor.Stop()
+			r.app.Stop()
 		}
-	}
+	}()
 
-	require.Eventually(
-		t,
-		func() bool {
-			caughtUp := true
-			for _, s := range testSuites[1 : len(testSuites)-1] {
-				if s.reactor.pool.MaxPeerHeight() == 0 || !s.reactor.pool.IsCaughtUp() {
-					caughtUp = false
-				}
-			}
-
-			return caughtUp
-		},
-		10*time.Minute,
-		10*time.Millisecond,
-		"expected all nodes to be fully synced",
-	)
-
-	for _, s := range testSuites[:len(testSuites)-1] {
-		require.Len(t, s.reactor.pool.peers, 3)
-	}
-
-	// Mark testSuites[3] as an invalid peer which will cause newSuite to disconnect
-	// from this peer.
-	otherGenDoc, otherPrivVals := randGenesisDoc(config, 1, false, 30)
-	otherSuite := setup(t, otherGenDoc, otherPrivVals, maxBlockHeight, 0)
-	testSuites[3].reactor.store = otherSuite.reactor.store
-
-	// add a fake peer just so we do not wait for the consensus ticker to timeout
-	otherSuite.reactor.pool.SetPeerRange("00ff", 10, 10)
-
-	// start the new peer's faux router
-	newSuite := testSuites[len(testSuites)-1]
-	simulateRouter(newSuite, testSuites, false)
-
-	// connect all nodes to the new peer
-	for _, s := range testSuites[:len(testSuites)-1] {
-		newSuite.peerUpdatesCh <- p2p.PeerUpdate{
-			Status: p2p.PeerStatusUp,
-			PeerID: s.peerID,
+	for {
+		if reactorPairs[3].reactor.pool.IsCaughtUp() {
+			break
 		}
+
+		time.Sleep(1 * time.Second)
 	}
 
-	// wait for the new peer to catch up and become fully synced
-	require.Eventually(
-		t,
-		func() bool { return newSuite.reactor.pool.MaxPeerHeight() > 0 && newSuite.reactor.pool.IsCaughtUp() },
-		10*time.Minute,
-		10*time.Millisecond,
-		"expected new node to be fully synced",
-	)
+	//at this time, reactors[0-3] is the newest
+	assert.Equal(t, 3, reactorPairs[1].reactor.Switch.Peers().Size())
 
-	require.Eventuallyf(
-		t,
-		func() bool { return len(newSuite.reactor.pool.peers) < len(testSuites)-1 },
-		10*time.Minute,
-		10*time.Millisecond,
-		"invalid number of peers; expected < %d, got: %d",
-		len(testSuites)-1,
-		len(newSuite.reactor.pool.peers),
-	)
+	//mark reactorPairs[3] is an invalid peer
+	reactorPairs[3].reactor.store = otherChain.reactor.store
+
+	lastReactorPair := newBlockchainReactor(log.TestingLogger(), genDoc, privVals, 0)
+	reactorPairs = append(reactorPairs, lastReactorPair)
+
+	switches = append(switches, p2p.MakeConnectedSwitches(config.P2P, 1, func(i int, s *p2p.Switch) *p2p.Switch {
+		s.AddReactor("BLOCKCHAIN", reactorPairs[len(reactorPairs)-1].reactor)
+		return s
+
+	}, p2p.Connect2Switches)...)
+
+	for i := 0; i < len(reactorPairs)-1; i++ {
+		p2p.Connect2Switches(switches, i, len(reactorPairs)-1)
+	}
+
+	for {
+		if lastReactorPair.reactor.pool.IsCaughtUp() || lastReactorPair.reactor.Switch.Peers().Size() == 0 {
+			break
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+
+	assert.True(t, lastReactorPair.reactor.Switch.Peers().Size() < len(reactorPairs)-1)
+}
+
+func TestBcBlockRequestMessageValidateBasic(t *testing.T) {
+	testCases := []struct {
+		testName      string
+		requestHeight int64
+		expectErr     bool
+	}{
+		{"Valid Request Message", 0, false},
+		{"Valid Request Message", 1, false},
+		{"Invalid Request Message", -1, true},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.testName, func(t *testing.T) {
+			request := bcBlockRequestMessage{Height: tc.requestHeight}
+			assert.Equal(t, tc.expectErr, request.ValidateBasic() != nil, "Validate Basic had an unexpected result")
+		})
+	}
+}
+
+func TestBcNoBlockResponseMessageValidateBasic(t *testing.T) {
+	testCases := []struct {
+		testName          string
+		nonResponseHeight int64
+		expectErr         bool
+	}{
+		{"Valid Non-Response Message", 0, false},
+		{"Valid Non-Response Message", 1, false},
+		{"Invalid Non-Response Message", -1, true},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.testName, func(t *testing.T) {
+			nonResponse := bcNoBlockResponseMessage{Height: tc.nonResponseHeight}
+			assert.Equal(t, tc.expectErr, nonResponse.ValidateBasic() != nil, "Validate Basic had an unexpected result")
+		})
+	}
+}
+
+func TestBcStatusRequestMessageValidateBasic(t *testing.T) {
+	testCases := []struct {
+		testName      string
+		requestHeight int64
+		expectErr     bool
+	}{
+		{"Valid Request Message", 0, false},
+		{"Valid Request Message", 1, false},
+		{"Invalid Request Message", -1, true},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.testName, func(t *testing.T) {
+			request := bcStatusRequestMessage{Height: tc.requestHeight}
+			assert.Equal(t, tc.expectErr, request.ValidateBasic() != nil, "Validate Basic had an unexpected result")
+		})
+	}
+}
+
+func TestBcStatusResponseMessageValidateBasic(t *testing.T) {
+	testCases := []struct {
+		testName       string
+		responseHeight int64
+		expectErr      bool
+	}{
+		{"Valid Response Message", 0, false},
+		{"Valid Response Message", 1, false},
+		{"Invalid Response Message", -1, true},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.testName, func(t *testing.T) {
+			response := bcStatusResponseMessage{Height: tc.responseHeight}
+			assert.Equal(t, tc.expectErr, response.ValidateBasic() != nil, "Validate Basic had an unexpected result")
+		})
+	}
+}
+
+//----------------------------------------------
+// utility funcs
+
+func makeTxs(height int64) (txs []types.Tx) {
+	for i := 0; i < 10; i++ {
+		txs = append(txs, types.Tx([]byte{byte(height), byte(i)}))
+	}
+	return txs
+}
+
+func makeBlock(height int64, state sm.State, lastCommit *types.Commit) *types.Block {
+	block, _ := state.MakeBlock(height, makeTxs(height), lastCommit, nil, state.Validators.GetProposer().Address)
+	return block
+}
+
+type testApp struct {
+	abci.BaseApplication
+}
+
+var _ abci.Application = (*testApp)(nil)
+
+func (app *testApp) Info(req abci.RequestInfo) (resInfo abci.ResponseInfo) {
+	return abci.ResponseInfo{}
+}
+
+func (app *testApp) BeginBlock(req abci.RequestBeginBlock) abci.ResponseBeginBlock {
+	return abci.ResponseBeginBlock{}
+}
+
+func (app *testApp) EndBlock(req abci.RequestEndBlock) abci.ResponseEndBlock {
+	return abci.ResponseEndBlock{}
+}
+
+func (app *testApp) DeliverTx(req abci.RequestDeliverTx) abci.ResponseDeliverTx {
+	return abci.ResponseDeliverTx{Events: []abci.Event{}}
+}
+
+func (app *testApp) CheckTx(req abci.RequestCheckTx) abci.ResponseCheckTx {
+	return abci.ResponseCheckTx{}
+}
+
+func (app *testApp) Commit() abci.ResponseCommit {
+	return abci.ResponseCommit{}
+}
+
+func (app *testApp) Query(reqQuery abci.RequestQuery) (resQuery abci.ResponseQuery) {
+	return
 }

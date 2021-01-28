@@ -1,19 +1,13 @@
 package state
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 
-	"github.com/gogo/protobuf/proto"
-	"github.com/google/orderedcode"
 	dbm "github.com/tendermint/tm-db"
 
 	abci "github.com/tendermint/tendermint/abci/types"
 	tmmath "github.com/tendermint/tendermint/libs/math"
 	tmos "github.com/tendermint/tendermint/libs/os"
-	tmstate "github.com/tendermint/tendermint/proto/tendermint/state"
-	tmproto "github.com/tendermint/tendermint/proto/tendermint/types"
 	"github.com/tendermint/tendermint/types"
 )
 
@@ -27,395 +21,242 @@ const (
 
 //------------------------------------------------------------------------
 
-const (
-	// prefixes are unique across all tm db's
-	prefixValidators      = int64(5)
-	prefixConsensusParams = int64(6)
-	prefixABCIResponses   = int64(7)
-)
-
-func encodeKey(prefix int64, height int64) []byte {
-	res, err := orderedcode.Append(nil, prefix, height)
-	if err != nil {
-		panic(err)
-	}
-	return res
+func calcValidatorsKey(height int64) []byte {
+	return []byte(fmt.Sprintf("validatorsKey:%v", height))
 }
 
-func validatorsKey(height int64) []byte {
-	return encodeKey(prefixValidators, height)
+func calcConsensusParamsKey(height int64) []byte {
+	return []byte(fmt.Sprintf("consensusParamsKey:%v", height))
 }
 
-func consensusParamsKey(height int64) []byte {
-	return encodeKey(prefixConsensusParams, height)
-}
-
-func abciResponsesKey(height int64) []byte {
-	return encodeKey(prefixABCIResponses, height)
-}
-
-//----------------------
-
-//go:generate mockery --case underscore --name Store
-
-// Store defines the state store interface
-//
-// It is used to retrieve current state and save and load ABCI responses,
-// validators and consensus parameters
-type Store interface {
-	// LoadFromDBOrGenesisFile loads the most recent state.
-	// If the chain is new it will use the genesis file from the provided genesis file path as the current state.
-	LoadFromDBOrGenesisFile(string) (State, error)
-	// LoadFromDBOrGenesisDoc loads the most recent state.
-	// If the chain is new it will use the genesis doc as the current state.
-	LoadFromDBOrGenesisDoc(*types.GenesisDoc) (State, error)
-	// Load loads the current state of the blockchain
-	Load() (State, error)
-	// LoadValidators loads the validator set at a given height
-	LoadValidators(int64) (*types.ValidatorSet, error)
-	// LoadABCIResponses loads the abciResponse for a given height
-	LoadABCIResponses(int64) (*tmstate.ABCIResponses, error)
-	// LoadConsensusParams loads the consensus params for a given height
-	LoadConsensusParams(int64) (types.ConsensusParams, error)
-	// Save overwrites the previous state with the updated one
-	Save(State) error
-	// SaveABCIResponses saves ABCIResponses for a given height
-	SaveABCIResponses(int64, *tmstate.ABCIResponses) error
-	// Bootstrap is used for bootstrapping state when not starting from a initial height.
-	Bootstrap(State) error
-	// PruneStates takes the height from which to prune up to (exclusive)
-	PruneStates(int64) error
-}
-
-// dbStore wraps a db (github.com/tendermint/tm-db)
-type dbStore struct {
-	db dbm.DB
-}
-
-var _ Store = (*dbStore)(nil)
-
-// NewStore creates the dbStore of the state pkg.
-func NewStore(db dbm.DB) Store {
-	return dbStore{db}
+func calcABCIResponsesKey(height int64) []byte {
+	return []byte(fmt.Sprintf("abciResponsesKey:%v", height))
 }
 
 // LoadStateFromDBOrGenesisFile loads the most recent state from the database,
-// or creates a new one from the given genesisFilePath.
-func (store dbStore) LoadFromDBOrGenesisFile(genesisFilePath string) (State, error) {
-	state, err := store.Load()
-	if err != nil {
-		return State{}, err
-	}
+// or creates a new one from the given genesisFilePath and persists the result
+// to the database.
+func LoadStateFromDBOrGenesisFile(stateDB dbm.DB, genesisFilePath string) (State, error) {
+	state := LoadState(stateDB)
 	if state.IsEmpty() {
 		var err error
 		state, err = MakeGenesisStateFromFile(genesisFilePath)
 		if err != nil {
 			return state, err
 		}
+		SaveState(stateDB, state)
 	}
 
 	return state, nil
 }
 
 // LoadStateFromDBOrGenesisDoc loads the most recent state from the database,
-// or creates a new one from the given genesisDoc.
-func (store dbStore) LoadFromDBOrGenesisDoc(genesisDoc *types.GenesisDoc) (State, error) {
-	state, err := store.Load()
-	if err != nil {
-		return State{}, err
-	}
-
+// or creates a new one from the given genesisDoc and persists the result
+// to the database.
+func LoadStateFromDBOrGenesisDoc(stateDB dbm.DB, genesisDoc *types.GenesisDoc) (State, error) {
+	state := LoadState(stateDB)
 	if state.IsEmpty() {
 		var err error
 		state, err = MakeGenesisState(genesisDoc)
 		if err != nil {
 			return state, err
 		}
+		SaveState(stateDB, state)
 	}
 
 	return state, nil
 }
 
 // LoadState loads the State from the database.
-func (store dbStore) Load() (State, error) {
-	return store.loadState(stateKey)
+func LoadState(db dbm.DB) State {
+	return loadState(db, stateKey)
 }
 
-func (store dbStore) loadState(key []byte) (state State, err error) {
-	buf, err := store.db.Get(key)
+func loadState(db dbm.DB, key []byte) (state State) {
+	buf, err := db.Get(key)
 	if err != nil {
-		return state, err
+		panic(err)
 	}
 	if len(buf) == 0 {
-		return state, nil
+		return state
 	}
 
-	sp := new(tmstate.State)
-
-	err = proto.Unmarshal(buf, sp)
+	err = cdc.UnmarshalBinaryBare(buf, &state)
 	if err != nil {
 		// DATA HAS BEEN CORRUPTED OR THE SPEC HAS CHANGED
 		tmos.Exit(fmt.Sprintf(`LoadState: Data has been corrupted or its spec has changed:
-		%v\n`, err))
+                %v\n`, err))
 	}
+	// TODO: ensure that buf is completely read.
 
-	sm, err := StateFromProto(sp)
-	if err != nil {
-		return state, err
-	}
-
-	return *sm, nil
+	return state
 }
 
-// Save persists the State, the ValidatorsInfo, and the ConsensusParamsInfo to the database.
+// SaveState persists the State, the ValidatorsInfo, and the ConsensusParamsInfo to the database.
 // This flushes the writes (e.g. calls SetSync).
-func (store dbStore) Save(state State) error {
-	return store.save(state, stateKey)
+func SaveState(db dbm.DB, state State) {
+	saveState(db, state, stateKey)
 }
 
-func (store dbStore) save(state State, key []byte) error {
+func saveState(db dbm.DB, state State, key []byte) {
 	nextHeight := state.LastBlockHeight + 1
-	// If first block, save validators for the block.
-	if nextHeight == 1 {
-		nextHeight = state.InitialHeight
+	// If first block, save validators for block 1.
+	if nextHeight == types.GetStartBlockHeight()+1 {
 		// This extra logic due to Tendermint validator set changes being delayed 1 block.
 		// It may get overwritten due to InitChain validator updates.
-		if err := store.saveValidatorsInfo(nextHeight, nextHeight, state.Validators); err != nil {
-			return err
-		}
+		lastHeightVoteChanged := types.GetStartBlockHeight() + 1
+		saveValidatorsInfo(db, nextHeight, lastHeightVoteChanged, state.Validators)
 	}
 	// Save next validators.
-	if err := store.saveValidatorsInfo(nextHeight+1, state.LastHeightValidatorsChanged, state.NextValidators); err != nil {
-		return err
-	}
-
+	saveValidatorsInfo(db, nextHeight+1, state.LastHeightValidatorsChanged, state.NextValidators)
 	// Save next consensus params.
-	if err := store.saveConsensusParamsInfo(nextHeight,
-		state.LastHeightConsensusParamsChanged, state.ConsensusParams); err != nil {
-		return err
-	}
-	err := store.db.SetSync(key, state.Bytes())
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// BootstrapState saves a new state, used e.g. by state sync when starting from non-zero height.
-func (store dbStore) Bootstrap(state State) error {
-	height := state.LastBlockHeight + 1
-	if height == 1 {
-		height = state.InitialHeight
-	}
-
-	if height > 1 && !state.LastValidators.IsNilOrEmpty() {
-		if err := store.saveValidatorsInfo(height-1, height-1, state.LastValidators); err != nil {
-			return err
-		}
-	}
-
-	if err := store.saveValidatorsInfo(height, height, state.Validators); err != nil {
-		return err
-	}
-
-	if err := store.saveValidatorsInfo(height+1, height+1, state.NextValidators); err != nil {
-		return err
-	}
-
-	if err := store.saveConsensusParamsInfo(height,
-		state.LastHeightConsensusParamsChanged, state.ConsensusParams); err != nil {
-		return err
-	}
-
-	return store.db.SetSync(stateKey, state.Bytes())
-}
-
-// PruneStates deletes states up to the height specified (exclusive). It is not
-// guaranteed to delete all states, since the last checkpointed state and states being pointed to by
-// e.g. `LastHeightChanged` must remain. The state at retain height must also exist.
-// Pruning is done in descending order.
-func (store dbStore) PruneStates(retainHeight int64) error {
-	if retainHeight <= 0 {
-		return fmt.Errorf("height %v must be greater than 0", retainHeight)
-	}
-
-	if err := store.pruneValidatorSets(retainHeight); err != nil {
-		return err
-	}
-
-	if err := store.pruneConsensusParams(retainHeight); err != nil {
-		return err
-	}
-
-	if err := store.pruneABCIResponses(retainHeight); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// pruneValidatorSets calls a reverse iterator from base height to retain height (exclusive), deleting
-// all validator sets in between. Due to the fact that most validator sets stored reference an earlier
-// validator set, it is likely that there will remain one validator set left after pruning.
-func (store dbStore) pruneValidatorSets(height int64) error {
-	valInfo, err := loadValidatorsInfo(store.db, height)
-	if err != nil {
-		return fmt.Errorf("validators at height %v not found: %w", height, err)
-	}
-
-	// We will prune up to the validator set at the given "height". As we don't save validator sets every
-	// height but only when they change or at a check point, it is likely that the validator set at the height
-	// we prune to is empty and thus dependent on the validator set saved at a previous height. We must find
-	// that validator set and make sure it is not pruned.
-	lastRecordedValSetHeight := lastStoredHeightFor(height, valInfo.LastHeightChanged)
-	lastRecordedValSet, err := loadValidatorsInfo(store.db, lastRecordedValSetHeight)
-	if err != nil || lastRecordedValSet.ValidatorSet == nil {
-		return fmt.Errorf("couldn't find validators at height %d (height %d was originally requested): %w",
-			lastStoredHeightFor(height, valInfo.LastHeightChanged),
-			height,
-			err,
-		)
-	}
-
-	// batch delete all the validators sets up to height
-	return store.batchDelete(
-		validatorsKey(1),
-		validatorsKey(height),
-		validatorsKey(lastRecordedValSetHeight),
-	)
-}
-
-// pruneConsensusParams calls a reverse iterator from base height to retain height batch deleting
-// all consensus params in between. If the consensus params at the new base height is dependent
-// on a prior height then this will keep that lower height to.
-func (store dbStore) pruneConsensusParams(retainHeight int64) error {
-	paramsInfo, err := store.loadConsensusParamsInfo(retainHeight)
-	if err != nil {
-		return fmt.Errorf("consensus params at height %v not found: %w", retainHeight, err)
-	}
-
-	// As we don't save the consensus params at every height, only when there is a consensus params change,
-	// we must not prune (or save) the last consensus params that the consensus params info at height
-	// is dependent on.
-	if paramsInfo.ConsensusParams.Equal(&tmproto.ConsensusParams{}) {
-		lastRecordedConsensusParams, err := store.loadConsensusParamsInfo(paramsInfo.LastHeightChanged)
-		if err != nil || lastRecordedConsensusParams.ConsensusParams.Equal(&tmproto.ConsensusParams{}) {
-			return fmt.Errorf(
-				"couldn't find consensus params at height %d as last changed from height %d: %w",
-				paramsInfo.LastHeightChanged,
-				retainHeight,
-				err,
-			)
-		}
-	}
-
-	// batch delete all the consensus params up to the retain height
-	return store.batchDelete(
-		consensusParamsKey(1),
-		consensusParamsKey(retainHeight),
-		consensusParamsKey(paramsInfo.LastHeightChanged),
-	)
-}
-
-// pruneABCIResponses calls a reverse iterator from base height to retain height batch deleting
-// all abci responses in between
-func (store dbStore) pruneABCIResponses(height int64) error {
-	return store.batchDelete(abciResponsesKey(1), abciResponsesKey(height), nil)
-}
-
-// batchDelete is a generic function for deleting a range of keys in reverse order. It will
-// skip keys that have been
-func (store dbStore) batchDelete(start []byte, end []byte, exception []byte) error {
-	iter, err := store.db.ReverseIterator(start, end)
-	if err != nil {
-		return fmt.Errorf("iterator error: %w", err)
-	}
-	defer iter.Close()
-
-	batch := store.db.NewBatch()
-	defer batch.Close()
-
-	pruned := 0
-	for iter.Valid() {
-		key := iter.Key()
-		if bytes.Equal(key, exception) {
-			iter.Next()
-			continue
-		}
-
-		if err := batch.Delete(key); err != nil {
-			return fmt.Errorf("pruning error at key %X: %w", key, err)
-		}
-
-		pruned++
-		// avoid batches growing too large by flushing to disk regularly
-		if pruned%1000 == 0 {
-			if err := iter.Error(); err != nil {
-				return err
-			}
-			if err := iter.Close(); err != nil {
-				return err
-			}
-
-			if err := batch.Write(); err != nil {
-				return fmt.Errorf("pruning error at key %X: %w", key, err)
-			}
-			if err := batch.Close(); err != nil {
-				return err
-			}
-
-			iter, err = store.db.ReverseIterator(start, end)
-			if err != nil {
-				return fmt.Errorf("iterator error: %w", err)
-			}
-			defer iter.Close()
-
-			batch = store.db.NewBatch()
-			defer batch.Close()
-		} else {
-			iter.Next()
-		}
-	}
-
-	if err := iter.Error(); err != nil {
-		return fmt.Errorf("iterator error: %w", err)
-	}
-
-	if err := batch.WriteSync(); err != nil {
-		return err
-	}
-
-	return nil
+	saveConsensusParamsInfo(db, nextHeight, state.LastHeightConsensusParamsChanged, state.ConsensusParams)
+	db.SetSync(key, state.Bytes())
 }
 
 //------------------------------------------------------------------------
 
-// ABCIResponsesResultsHash returns the root hash of a Merkle tree of
-// ResponseDeliverTx responses (see ABCIResults.Hash)
-//
-// See merkle.SimpleHashFromByteSlices
-func ABCIResponsesResultsHash(ar *tmstate.ABCIResponses) []byte {
-	return types.NewResults(ar.DeliverTxs).Hash()
+// ABCIResponses retains the responses
+// of the various ABCI calls during block processing.
+// It is persisted to disk for each height before calling Commit.
+type ABCIResponses struct {
+	DeliverTxs []*abci.ResponseDeliverTx `json:"deliver_txs"`
+	EndBlock   *abci.ResponseEndBlock    `json:"end_block"`
+	BeginBlock *abci.ResponseBeginBlock  `json:"begin_block"`
 }
 
-// LoadABCIResponses loads the ABCIResponses for the given height from the
-// database. If not found, ErrNoABCIResponsesForHeight is returned.
+// PruneStates deletes states between the given heights (including from, excluding to). It is not
+// guaranteed to delete all states, since the last checkpointed state and states being pointed to by
+// e.g. `LastHeightChanged` must remain. The state at to must also exist.
 //
-// This is useful for recovering from crashes where we called app.Commit and
-// before we called s.Save(). It can also be used to produce Merkle proofs of
-// the result of txs.
-func (store dbStore) LoadABCIResponses(height int64) (*tmstate.ABCIResponses, error) {
-	buf, err := store.db.Get(abciResponsesKey(height))
+// The from parameter is necessary since we can't do a key scan in a performant way due to the key
+// encoding not preserving ordering: https://github.com/tendermint/tendermint/issues/4567
+// This will cause some old states to be left behind when doing incremental partial prunes,
+// specifically older checkpoints and LastHeightChanged targets.
+func PruneStates(db dbm.DB, from int64, to int64) error {
+	if from <= 0 || to <= 0 {
+		return fmt.Errorf("from height %v and to height %v must be greater than 0", from, to)
+	}
+	if from >= to {
+		return fmt.Errorf("from height %v must be lower than to height %v", from, to)
+	}
+	valInfo := loadValidatorsInfo(db, to)
+	if valInfo == nil {
+		return fmt.Errorf("validators at height %v not found", to)
+	}
+	paramsInfo := loadConsensusParamsInfo(db, to)
+	if paramsInfo == nil {
+		return fmt.Errorf("consensus params at height %v not found", to)
+	}
+
+	keepVals := make(map[int64]bool)
+	if valInfo.ValidatorSet == nil {
+		keepVals[valInfo.LastHeightChanged] = true
+		keepVals[lastStoredHeightFor(to, valInfo.LastHeightChanged)] = true // keep last checkpoint too
+	}
+	keepParams := make(map[int64]bool)
+	if paramsInfo.ConsensusParams.Equals(&types.ConsensusParams{}) {
+		keepParams[paramsInfo.LastHeightChanged] = true
+	}
+
+	batch := db.NewBatch()
+	defer batch.Close()
+	pruned := uint64(0)
+	var err error
+
+	// We have to delete in reverse order, to avoid deleting previous heights that have validator
+	// sets and consensus params that we may need to retrieve.
+	for h := to - 1; h >= from; h-- {
+		// For heights we keep, we must make sure they have the full validator set or consensus
+		// params, otherwise they will panic if they're retrieved directly (instead of
+		// indirectly via a LastHeightChanged pointer).
+		if keepVals[h] {
+			v := loadValidatorsInfo(db, h)
+			if v.ValidatorSet == nil {
+				v.ValidatorSet, err = LoadValidators(db, h)
+				if err != nil {
+					return err
+				}
+				v.LastHeightChanged = h
+				batch.Set(calcValidatorsKey(h), v.Bytes())
+			}
+		} else {
+			batch.Delete(calcValidatorsKey(h))
+		}
+
+		if keepParams[h] {
+			p := loadConsensusParamsInfo(db, h)
+			if p.ConsensusParams.Equals(&types.ConsensusParams{}) {
+				p.ConsensusParams, err = LoadConsensusParams(db, h)
+				if err != nil {
+					return err
+				}
+				p.LastHeightChanged = h
+				batch.Set(calcConsensusParamsKey(h), p.Bytes())
+			}
+		} else {
+			batch.Delete(calcConsensusParamsKey(h))
+		}
+
+		batch.Delete(calcABCIResponsesKey(h))
+		pruned++
+
+		// avoid batches growing too large by flushing to database regularly
+		if pruned%1000 == 0 && pruned > 0 {
+			err := batch.Write()
+			if err != nil {
+				return err
+			}
+			batch.Close()
+			batch = db.NewBatch()
+			defer batch.Close()
+		}
+	}
+
+	err = batch.WriteSync()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// NewABCIResponses returns a new ABCIResponses
+func NewABCIResponses(block *types.Block) *ABCIResponses {
+	resDeliverTxs := make([]*abci.ResponseDeliverTx, len(block.Data.Txs))
+	if len(block.Data.Txs) == 0 {
+		// This makes Amino encoding/decoding consistent.
+		resDeliverTxs = nil
+	}
+	return &ABCIResponses{
+		DeliverTxs: resDeliverTxs,
+	}
+}
+
+// Bytes serializes the ABCIResponse using go-amino.
+func (arz *ABCIResponses) Bytes() []byte {
+	return cdc.MustMarshalBinaryBare(arz)
+}
+
+func (arz *ABCIResponses) ResultsHash() []byte {
+	results := types.NewResults(arz.DeliverTxs)
+	return results.Hash()
+}
+
+// LoadABCIResponses loads the ABCIResponses for the given height from the database.
+// This is useful for recovering from crashes where we called app.Commit and before we called
+// s.Save(). It can also be used to produce Merkle proofs of the result of txs.
+func LoadABCIResponses(db dbm.DB, height int64) (*ABCIResponses, error) {
+	buf, err := db.Get(calcABCIResponsesKey(height))
 	if err != nil {
 		return nil, err
 	}
 	if len(buf) == 0 {
-
 		return nil, ErrNoABCIResponsesForHeight{height}
 	}
 
-	abciResponses := new(tmstate.ABCIResponses)
-	err = abciResponses.Unmarshal(buf)
+	abciResponses := new(ABCIResponses)
+	err = cdc.UnmarshalBinaryBare(buf, abciResponses)
 	if err != nil {
 		// DATA HAS BEEN CORRUPTED OR THE SPEC HAS CHANGED
 		tmos.Exit(fmt.Sprintf(`LoadABCIResponses: Data has been corrupted or its spec has
@@ -432,72 +273,46 @@ func (store dbStore) LoadABCIResponses(height int64) (*tmstate.ABCIResponses, er
 // Merkle proofs.
 //
 // Exposed for testing.
-func (store dbStore) SaveABCIResponses(height int64, abciResponses *tmstate.ABCIResponses) error {
-	var dtxs []*abci.ResponseDeliverTx
-	// strip nil values,
-	for _, tx := range abciResponses.DeliverTxs {
-		if tx != nil {
-			dtxs = append(dtxs, tx)
-		}
-	}
-	abciResponses.DeliverTxs = dtxs
-
-	bz, err := abciResponses.Marshal()
-	if err != nil {
-		return err
-	}
-
-	err = store.db.SetSync(abciResponsesKey(height), bz)
-	if err != nil {
-		return err
-	}
-
-	return nil
+func SaveABCIResponses(db dbm.DB, height int64, abciResponses *ABCIResponses) {
+	db.SetSync(calcABCIResponsesKey(height), abciResponses.Bytes())
 }
 
 //-----------------------------------------------------------------------------
 
+// ValidatorsInfo represents the latest validator set, or the last height it changed
+type ValidatorsInfo struct {
+	ValidatorSet      *types.ValidatorSet
+	LastHeightChanged int64
+}
+
+// Bytes serializes the ValidatorsInfo using go-amino.
+func (valInfo *ValidatorsInfo) Bytes() []byte {
+	return cdc.MustMarshalBinaryBare(valInfo)
+}
+
 // LoadValidators loads the ValidatorSet for a given height.
 // Returns ErrNoValSetForHeight if the validator set can't be found for this height.
-func (store dbStore) LoadValidators(height int64) (*types.ValidatorSet, error) {
-
-	valInfo, err := loadValidatorsInfo(store.db, height)
-	if err != nil {
+func LoadValidators(db dbm.DB, height int64) (*types.ValidatorSet, error) {
+	valInfo := loadValidatorsInfo(db, height)
+	if valInfo == nil {
 		return nil, ErrNoValSetForHeight{height}
 	}
 	if valInfo.ValidatorSet == nil {
 		lastStoredHeight := lastStoredHeightFor(height, valInfo.LastHeightChanged)
-		valInfo2, err := loadValidatorsInfo(store.db, lastStoredHeight)
-		if err != nil || valInfo2.ValidatorSet == nil {
-			return nil,
-				fmt.Errorf("couldn't find validators at height %d (height %d was originally requested): %w",
+		valInfo2 := loadValidatorsInfo(db, lastStoredHeight)
+		if valInfo2 == nil || valInfo2.ValidatorSet == nil {
+			panic(
+				fmt.Sprintf("Couldn't find validators at height %d (height %d was originally requested)",
 					lastStoredHeight,
 					height,
-					err,
-				)
+				),
+			)
 		}
-
-		vs, err := types.ValidatorSetFromProto(valInfo2.ValidatorSet)
-		if err != nil {
-			return nil, err
-		}
-
-		vs.IncrementProposerPriority(tmmath.SafeConvertInt32(height - lastStoredHeight)) // mutate
-		vi2, err := vs.ToProto()
-		if err != nil {
-			return nil, err
-		}
-
-		valInfo2.ValidatorSet = vi2
+		valInfo2.ValidatorSet.IncrementProposerPriority(int(height - lastStoredHeight)) // mutate
 		valInfo = valInfo2
 	}
 
-	vip, err := types.ValidatorSetFromProto(valInfo.ValidatorSet)
-	if err != nil {
-		return nil, err
-	}
-
-	return vip, nil
+	return valInfo.ValidatorSet, nil
 }
 
 func lastStoredHeightFor(height, lastHeightChanged int64) int64 {
@@ -506,18 +321,17 @@ func lastStoredHeightFor(height, lastHeightChanged int64) int64 {
 }
 
 // CONTRACT: Returned ValidatorsInfo can be mutated.
-func loadValidatorsInfo(db dbm.DB, height int64) (*tmstate.ValidatorsInfo, error) {
-	buf, err := db.Get(validatorsKey(height))
+func loadValidatorsInfo(db dbm.DB, height int64) *ValidatorsInfo {
+	buf, err := db.Get(calcValidatorsKey(height))
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
-
 	if len(buf) == 0 {
-		return nil, errors.New("value retrieved from db is empty")
+		return nil
 	}
 
-	v := new(tmstate.ValidatorsInfo)
-	err = v.Unmarshal(buf)
+	v := new(ValidatorsInfo)
+	err = cdc.UnmarshalBinaryBare(buf, v)
 	if err != nil {
 		// DATA HAS BEEN CORRUPTED OR THE SPEC HAS CHANGED
 		tmos.Exit(fmt.Sprintf(`LoadValidators: Data has been corrupted or its spec has changed:
@@ -525,7 +339,7 @@ func loadValidatorsInfo(db dbm.DB, height int64) (*tmstate.ValidatorsInfo, error
 	}
 	// TODO: ensure that buf is completely read.
 
-	return v, nil
+	return v
 }
 
 // saveValidatorsInfo persists the validator set.
@@ -533,111 +347,91 @@ func loadValidatorsInfo(db dbm.DB, height int64) (*tmstate.ValidatorsInfo, error
 // `height` is the effective height for which the validator is responsible for
 // signing. It should be called from s.Save(), right before the state itself is
 // persisted.
-func (store dbStore) saveValidatorsInfo(height, lastHeightChanged int64, valSet *types.ValidatorSet) error {
+func saveValidatorsInfo(db dbm.DB, height, lastHeightChanged int64, valSet *types.ValidatorSet) {
 	if lastHeightChanged > height {
-		return errors.New("lastHeightChanged cannot be greater than ValidatorsInfo height")
+		panic("LastHeightChanged cannot be greater than ValidatorsInfo height")
 	}
-	valInfo := &tmstate.ValidatorsInfo{
+	valInfo := &ValidatorsInfo{
 		LastHeightChanged: lastHeightChanged,
 	}
 	// Only persist validator set if it was updated or checkpoint height (see
 	// valSetCheckpointInterval) is reached.
 	if height == lastHeightChanged || height%valSetCheckpointInterval == 0 {
-		pv, err := valSet.ToProto()
-		if err != nil {
-			return err
-		}
-		valInfo.ValidatorSet = pv
+		valInfo.ValidatorSet = valSet
 	}
-
-	bz, err := valInfo.Marshal()
-	if err != nil {
-		return err
-	}
-
-	err = store.db.Set(validatorsKey(height), bz)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	db.Set(calcValidatorsKey(height), valInfo.Bytes())
 }
 
 //-----------------------------------------------------------------------------
 
 // ConsensusParamsInfo represents the latest consensus params, or the last height it changed
+type ConsensusParamsInfo struct {
+	ConsensusParams   types.ConsensusParams
+	LastHeightChanged int64
+}
 
-// Allocate empty Consensus params at compile time to avoid multiple allocations during runtime
-var (
-	empty   = types.ConsensusParams{}
-	emptypb = tmproto.ConsensusParams{}
-)
+// Bytes serializes the ConsensusParamsInfo using go-amino.
+func (params ConsensusParamsInfo) Bytes() []byte {
+	return cdc.MustMarshalBinaryBare(params)
+}
 
 // LoadConsensusParams loads the ConsensusParams for a given height.
-func (store dbStore) LoadConsensusParams(height int64) (types.ConsensusParams, error) {
-	paramsInfo, err := store.loadConsensusParamsInfo(height)
-	if err != nil {
-		return empty, fmt.Errorf("could not find consensus params for height #%d: %w", height, err)
+func LoadConsensusParams(db dbm.DB, height int64) (types.ConsensusParams, error) {
+	empty := types.ConsensusParams{}
+
+	paramsInfo := loadConsensusParamsInfo(db, height)
+	if paramsInfo == nil {
+		return empty, ErrNoConsensusParamsForHeight{height}
 	}
 
-	if paramsInfo.ConsensusParams.Equal(&emptypb) {
-		paramsInfo2, err := store.loadConsensusParamsInfo(paramsInfo.LastHeightChanged)
-		if err != nil {
-			return empty, fmt.Errorf(
-				"couldn't find consensus params at height %d as last changed from height %d: %w",
-				paramsInfo.LastHeightChanged,
-				height,
-				err,
+	if paramsInfo.ConsensusParams.Equals(&empty) {
+		paramsInfo2 := loadConsensusParamsInfo(db, paramsInfo.LastHeightChanged)
+		if paramsInfo2 == nil {
+			panic(
+				fmt.Sprintf(
+					"Couldn't find consensus params at height %d as last changed from height %d",
+					paramsInfo.LastHeightChanged,
+					height,
+				),
 			)
 		}
-
 		paramsInfo = paramsInfo2
 	}
 
-	return types.ConsensusParamsFromProto(paramsInfo.ConsensusParams), nil
+	return paramsInfo.ConsensusParams, nil
 }
 
-func (store dbStore) loadConsensusParamsInfo(height int64) (*tmstate.ConsensusParamsInfo, error) {
-	buf, err := store.db.Get(consensusParamsKey(height))
+func loadConsensusParamsInfo(db dbm.DB, height int64) *ConsensusParamsInfo {
+	buf, err := db.Get(calcConsensusParamsKey(height))
 	if err != nil {
-		return nil, err
+		panic(err)
 	}
 	if len(buf) == 0 {
-		return nil, errors.New("value retrieved from db is empty")
+		return nil
 	}
 
-	paramsInfo := new(tmstate.ConsensusParamsInfo)
-	if err = paramsInfo.Unmarshal(buf); err != nil {
+	paramsInfo := new(ConsensusParamsInfo)
+	err = cdc.UnmarshalBinaryBare(buf, paramsInfo)
+	if err != nil {
 		// DATA HAS BEEN CORRUPTED OR THE SPEC HAS CHANGED
 		tmos.Exit(fmt.Sprintf(`LoadConsensusParams: Data has been corrupted or its spec has changed:
                 %v\n`, err))
 	}
 	// TODO: ensure that buf is completely read.
 
-	return paramsInfo, nil
+	return paramsInfo
 }
 
 // saveConsensusParamsInfo persists the consensus params for the next block to disk.
 // It should be called from s.Save(), right before the state itself is persisted.
 // If the consensus params did not change after processing the latest block,
 // only the last height for which they changed is persisted.
-func (store dbStore) saveConsensusParamsInfo(nextHeight, changeHeight int64, params types.ConsensusParams) error {
-	paramsInfo := &tmstate.ConsensusParamsInfo{
+func saveConsensusParamsInfo(db dbm.DB, nextHeight, changeHeight int64, params types.ConsensusParams) {
+	paramsInfo := &ConsensusParamsInfo{
 		LastHeightChanged: changeHeight,
 	}
-
 	if changeHeight == nextHeight {
-		paramsInfo.ConsensusParams = params.ToProto()
+		paramsInfo.ConsensusParams = params
 	}
-	bz, err := paramsInfo.Marshal()
-	if err != nil {
-		return err
-	}
-
-	err = store.db.Set(consensusParamsKey(nextHeight), bz)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	db.Set(calcConsensusParamsKey(nextHeight), paramsInfo.Bytes())
 }

@@ -3,7 +3,6 @@ package log
 import (
 	"io"
 	"os"
-	"sync"
 	"testing"
 
 	"github.com/go-kit/kit/log/term"
@@ -11,8 +10,7 @@ import (
 
 var (
 	// reuse the same logger across all tests
-	_testingLoggerMutex = sync.Mutex{}
-	_testingLogger      Logger
+	_testingLogger Logger
 )
 
 // TestingLogger returns a TMLogger which writes to STDOUT if testing being run
@@ -32,8 +30,6 @@ func TestingLogger() Logger {
 // inside a test (not in the init func) because
 // verbose flag only set at the time of testing.
 func TestingLoggerWithOutput(w io.Writer) Logger {
-	_testingLoggerMutex.Lock()
-	defer _testingLoggerMutex.Unlock()
 	if _testingLogger != nil {
 		return _testingLogger
 	}
@@ -50,8 +46,6 @@ func TestingLoggerWithOutput(w io.Writer) Logger {
 // TestingLoggerWithColorFn allow you to provide your own color function. See
 // TestingLogger for documentation.
 func TestingLoggerWithColorFn(colorFn func(keyvals ...interface{}) term.FgBgColor) Logger {
-	_testingLoggerMutex.Lock()
-	defer _testingLoggerMutex.Unlock()
 	if _testingLogger != nil {
 		return _testingLogger
 	}

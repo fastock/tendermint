@@ -19,10 +19,10 @@ func init() {
 }
 
 type testPeer struct {
-	id        p2p.NodeID
+	id        p2p.ID
 	base      int64
 	height    int64
-	inputChan chan inputData // make sure each peer's data is sequential
+	inputChan chan inputData //make sure each peer's data is sequential
 }
 
 type inputData struct {
@@ -49,7 +49,7 @@ func (p testPeer) simulateInput(input inputData) {
 	// input.t.Logf("Added block from peer %v (height: %v)", input.request.PeerID, input.request.Height)
 }
 
-type testPeers map[p2p.NodeID]testPeer
+type testPeers map[p2p.ID]testPeer
 
 func (ps testPeers) start() {
 	for _, v := range ps {
@@ -66,7 +66,7 @@ func (ps testPeers) stop() {
 func makePeers(numPeers int, minHeight, maxHeight int64) testPeers {
 	peers := make(testPeers, numPeers)
 	for i := 0; i < numPeers; i++ {
-		peerID := p2p.NodeID(tmrand.Str(12))
+		peerID := p2p.ID(tmrand.Str(12))
 		height := minHeight + tmrand.Int63n(maxHeight-minHeight)
 		base := minHeight + int64(i)
 		if base > height {
@@ -90,11 +90,7 @@ func TestBlockPoolBasic(t *testing.T) {
 		t.Error(err)
 	}
 
-	t.Cleanup(func() {
-		if err := pool.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
+	defer pool.Stop()
 
 	peers.start()
 	defer peers.stop()
@@ -148,11 +144,7 @@ func TestBlockPoolTimeout(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	t.Cleanup(func() {
-		if err := pool.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
+	defer pool.Stop()
 
 	for _, peer := range peers {
 		t.Logf("Peer %v", peer.id)
@@ -182,7 +174,7 @@ func TestBlockPoolTimeout(t *testing.T) {
 
 	// Pull from channels
 	counter := 0
-	timedOut := map[p2p.NodeID]struct{}{}
+	timedOut := map[p2p.ID]struct{}{}
 	for {
 		select {
 		case err := <-errorsCh:
@@ -203,7 +195,7 @@ func TestBlockPoolTimeout(t *testing.T) {
 func TestBlockPoolRemovePeer(t *testing.T) {
 	peers := make(testPeers, 10)
 	for i := 0; i < 10; i++ {
-		peerID := p2p.NodeID(fmt.Sprintf("%d", i+1))
+		peerID := p2p.ID(fmt.Sprintf("%d", i+1))
 		height := int64(i + 1)
 		peers[peerID] = testPeer{peerID, 0, height, make(chan inputData)}
 	}
@@ -214,11 +206,7 @@ func TestBlockPoolRemovePeer(t *testing.T) {
 	pool.SetLogger(log.TestingLogger())
 	err := pool.Start()
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		if err := pool.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
+	defer pool.Stop()
 
 	// add peers
 	for peerID, peer := range peers {
@@ -227,10 +215,10 @@ func TestBlockPoolRemovePeer(t *testing.T) {
 	assert.EqualValues(t, 10, pool.MaxPeerHeight())
 
 	// remove not-existing peer
-	assert.NotPanics(t, func() { pool.RemovePeer(p2p.NodeID("Superman")) })
+	assert.NotPanics(t, func() { pool.RemovePeer(p2p.ID("Superman")) })
 
 	// remove peer with biggest height
-	pool.RemovePeer(p2p.NodeID("10"))
+	pool.RemovePeer(p2p.ID("10"))
 	assert.EqualValues(t, 9, pool.MaxPeerHeight())
 
 	// remove all peers

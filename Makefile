@@ -1,18 +1,8 @@
-#!/usr/bin/make -f
-
 PACKAGES=$(shell go list ./...)
-BUILDDIR ?= $(CURDIR)/build
+OUTPUT?=build/tendermint
 
 BUILD_TAGS?=tendermint
-
-# If building a release, please checkout the version tag to get the correct version setting
-ifneq ($(shell git symbolic-ref -q --short HEAD),)
-VERSION := unreleased-$(shell git symbolic-ref -q --short HEAD)-$(shell git rev-parse HEAD)
-else
-VERSION := $(shell git describe)
-endif
-
-LD_FLAGS = -X github.com/tendermint/tendermint/version.TMCoreSemVer=$(VERSION)
+LD_FLAGS = -X github.com/tendermint/tendermint/version.GitCommit=`git rev-parse --short=8 HEAD`
 BUILD_FLAGS = -mod=readonly -ldflags "$(LD_FLAGS)"
 HTTPS_GIT := https://github.com/tendermint/tendermint.git
 DOCKER_BUF := docker run -v $(shell pwd):/workspace --workdir /workspace bufbuild/buf
@@ -36,22 +26,6 @@ ifeq (cleveldb,$(findstring cleveldb,$(TENDERMINT_BUILD_OPTIONS)))
   BUILD_TAGS += cleveldb
 endif
 
-# handle badgerdb
-ifeq (badgerdb,$(findstring badgerdb,$(TENDERMINT_BUILD_OPTIONS)))
-  BUILD_TAGS += badgerdb
-endif
-
-# handle rocksdb
-ifeq (rocksdb,$(findstring rocksdb,$(TENDERMINT_BUILD_OPTIONS)))
-  CGO_ENABLED=1
-  BUILD_TAGS += rocksdb
-endif
-
-# handle boltdb
-ifeq (boltdb,$(findstring boltdb,$(TENDERMINT_BUILD_OPTIONS)))
-  BUILD_TAGS += boltdb
-endif
-
 # allow users to pass additional flags via the conventional LDFLAGS variable
 LD_FLAGS += $(LDFLAGS)
 
@@ -59,23 +33,20 @@ all: check build test install
 .PHONY: all
 
 # The below include contains the tools.
-include tools/Makefile
-include test/Makefile
+include tools.mk
+include tests.mk
 
 ###############################################################################
-###                                Build Tendermint                         ###
+###                                Build Tendermint                        ###
 ###############################################################################
 
-build: $(BUILDDIR)/
-	CGO_ENABLED=$(CGO_ENABLED) go build $(BUILD_FLAGS) -tags '$(BUILD_TAGS)' -o $(BUILDDIR)/ ./cmd/tendermint/
+build:
+	CGO_ENABLED=$(CGO_ENABLED) go build $(BUILD_FLAGS) -tags '$(BUILD_TAGS)' -o $(OUTPUT) ./cmd/tendermint/
 .PHONY: build
 
 install:
 	CGO_ENABLED=$(CGO_ENABLED) go install $(BUILD_FLAGS) -tags $(BUILD_TAGS) ./cmd/tendermint
 .PHONY: install
-
-$(BUILDDIR)/:
-	mkdir -p $@
 
 ###############################################################################
 ###                                Protobuf                                 ###
@@ -94,7 +65,6 @@ proto-gen:
 .PHONY: proto-gen
 
 proto-gen-docker:
-	@docker pull -q tendermintdev/docker-build-proto
 	@echo "Generating Protobuf files"
 	@docker run -v $(shell pwd):/workspace --workdir /workspace tendermintdev/docker-build-proto sh ./scripts/protocgen.sh
 .PHONY: proto-gen-docker
@@ -102,11 +72,6 @@ proto-gen-docker:
 proto-lint:
 	@$(DOCKER_BUF) check lint --error-format=json
 .PHONY: proto-lint
-
-proto-format:
-	@echo "Formatting Protobuf files"
-	docker run -v $(shell pwd):/workspace --workdir /workspace tendermintdev/docker-build-proto find ./ -not -path "./third_party/*" -name *.proto -exec clang-format -i {} \;
-.PHONY: proto-format
 
 proto-check-breaking:
 	@$(DOCKER_BUF) check breaking --against-input .git#branch=master
@@ -127,27 +92,6 @@ build_abci:
 install_abci:
 	@go install -mod=readonly ./abci/cmd/...
 .PHONY: install_abci
-
-###############################################################################
-###                           	Privval Server                              ###
-###############################################################################
-
-build_privval_server:
-	@go build -mod=readonly -o $(BUILDDIR)/ -i ./cmd/priv_val_server/...
-.PHONY: build_privval_server
-
-generate_test_cert:
-	# generate self signing ceritificate authority
-	@certstrap init --common-name "root CA" --expires "20 years"
-	# generate server cerificate
-	@certstrap request-cert -cn server -ip 127.0.0.1
-	# self-sign server cerificate with rootCA
-	@certstrap sign server --CA "root CA" 
-	# generate client cerificate
-	@certstrap request-cert -cn client -ip 127.0.0.1
-	# self-sign client cerificate with rootCA
-	@certstrap sign client --CA "root CA" 
-.PHONY: generate_test_cert
 
 ###############################################################################
 ###                              Distribution                               ###
@@ -177,7 +121,7 @@ draw_deps:
 
 get_deps_bin_size:
 	@# Copy of build recipe with additional flags to perform binary size analysis
-	$(eval $(shell go build -work -a $(BUILD_FLAGS) -tags $(BUILD_TAGS) -o $(BUILDDIR)/ ./cmd/tendermint/ 2>&1))
+	$(eval $(shell go build -work -a $(BUILD_FLAGS) -tags $(BUILD_TAGS) -o $(OUTPUT) ./cmd/tendermint/ 2>&1))
 	@find $(WORK) -type f -name "*.a" | xargs -I{} du -hxs "{}" | sort -rh | sed -e s:${WORK}/::g > deps_bin_size.log
 	@echo "Results can be found here: $(CURDIR)/deps_bin_size.log"
 .PHONY: get_deps_bin_size
@@ -221,23 +165,31 @@ DESTINATION = ./index.html.md
 ###############################################################################
 ###                           Documentation                                 ###
 ###############################################################################
-# todo remove once tendermint.com DNS is solved
+
 build-docs:
-	@cd docs && \
-	while read -r branch path_prefix; do \
-		(git checkout $${branch} && npm install && VUEPRESS_BASE="/$${path_prefix}/" npm run build) ; \
-		mkdir -p ~/output/$${path_prefix} ; \
-		cp -r .vuepress/dist/* ~/output/$${path_prefix}/ ; \
-		cp ~/output/$${path_prefix}/index.html ~/output ; \
+	cd docs && \
+	while read p; do \
+		(git checkout $${p} && npm install && VUEPRESS_BASE="/$${p}/" npm run build) ; \
+		mkdir -p ~/output/$${p} ; \
+		cp -r .vuepress/dist/* ~/output/$${p}/ ; \
+		cp ~/output/$${p}/index.html ~/output ; \
 	done < versions ;
 .PHONY: build-docs
+
+sync-docs:
+	cd ~/output && \
+	echo "role_arn = ${DEPLOYMENT_ROLE_ARN}" >> /root/.aws/config ; \
+	echo "CI job = ${CIRCLE_BUILD_URL}" >> version.html ; \
+	aws s3 sync . s3://${WEBSITE_BUCKET} --profile terraform --delete ; \
+	aws cloudfront create-invalidation --distribution-id ${CF_DISTRIBUTION_ID} --profile terraform --path "/*" ;
+.PHONY: sync-docs
 
 ###############################################################################
 ###                            Docker image                                 ###
 ###############################################################################
 
-build-docker: build-linux
-	cp $(BUILDDIR)/tendermint DOCKER/tendermint
+build-docker:
+	cp $(OUTPUT) DOCKER/tendermint
 	docker build --label=tendermint --tag="tendermint/tendermint" DOCKER
 	rm -rf DOCKER/tendermint
 .PHONY: build-docker
@@ -265,7 +217,7 @@ build_c-amazonlinux:
 
 # Run a 4-node testnet locally
 localnet-start: localnet-stop build-docker-localnode
-	@if ! [ -f build/node0/config/genesis.json ]; then docker run --rm -v $(CURDIR)/build:/tendermint:Z tendermint/localnode testnet --config /etc/tendermint/config-template.toml --o . --starting-ip-address 192.167.10.2; fi
+	@if ! [ -f build/node0/config/genesis.json ]; then docker run --rm -v $(CURDIR)/build:/tendermint:Z tendermint/localnode testnet --config /etc/tendermint/config-template.toml --v 4 --o . --populate-persistent-peers --starting-ip-address 192.167.10.2; fi
 	docker-compose up
 .PHONY: localnet-start
 
@@ -291,17 +243,3 @@ endif
 contract-tests:
 	dredd
 .PHONY: contract-tests
-
-clean:
-	rm -rf $(CURDIR)/artifacts/ $(BUILDDIR)/
-
-build-reproducible:
-	docker rm latest-build || true
-	docker run --volume=$(CURDIR):/sources:ro \
-		--env TARGET_PLATFORMS='linux/amd64 linux/arm64 darwin/amd64 windows/amd64' \
-		--env APP=tendermint \
-		--env COMMIT=$(shell git rev-parse --short=8 HEAD) \
-		--env VERSION=$(shell git describe --tags) \
-		--name latest-build cosmossdk/rbuilder:latest
-	docker cp -a latest-build:/home/builder/artifacts/ $(CURDIR)/
-.PHONY: build-reproducible

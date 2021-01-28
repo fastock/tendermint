@@ -8,34 +8,27 @@ import (
 	"github.com/tendermint/tendermint/libs/log"
 	tmos "github.com/tendermint/tendermint/libs/os"
 	"github.com/tendermint/tendermint/privval"
-	"github.com/tendermint/tendermint/types"
 )
 
 // ResetAllCmd removes the database of this Tendermint core
 // instance.
 var ResetAllCmd = &cobra.Command{
-	Use:     "unsafe-reset-all",
-	Aliases: []string{"unsafe_reset_all"},
-	Short:   "(unsafe) Remove all the data and WAL, reset this node's validator to genesis state",
-	Run:     resetAll,
-	PreRun:  deprecateSnakeCase,
+	Use:   "unsafe_reset_all",
+	Short: "(unsafe) Remove all the data and WAL, reset this node's validator to genesis state",
+	Run:   resetAll,
 }
 
 var keepAddrBook bool
 
 func init() {
-	ResetAllCmd.Flags().BoolVar(&keepAddrBook, "keep-addr-book", false, "keep the address book intact")
-	ResetPrivValidatorCmd.Flags().StringVar(&keyType, "key", types.ABCIPubKeyTypeEd25519,
-		"Key type to generate privval file with. Options: ed25519, secp256k1")
+	ResetAllCmd.Flags().BoolVar(&keepAddrBook, "keep-addr-book", false, "Keep the address book intact")
 }
 
 // ResetPrivValidatorCmd resets the private validator files.
 var ResetPrivValidatorCmd = &cobra.Command{
-	Use:     "unsafe-reset-priv-validator",
-	Aliases: []string{"unsafe_reset_priv_validator"},
-	Short:   "(unsafe) Reset this node's validator to genesis state",
-	Run:     resetPrivValidator,
-	PreRun:  deprecateSnakeCase,
+	Use:   "unsafe_reset_priv_validator",
+	Short: "(unsafe) Reset this node's validator to genesis state",
+	Run:   resetPrivValidator,
 }
 
 // XXX: this is totally unsafe.
@@ -65,9 +58,7 @@ func ResetAll(dbDir, addrBookFile, privValKeyFile, privValStateFile string, logg
 		logger.Error("Error removing all blockchain history", "dir", dbDir, "err", err)
 	}
 	// recreate the dbDir since the privVal state needs to live there
-	if err := tmos.EnsureDir(dbDir, 0700); err != nil {
-		logger.Error("unable to recreate dbDir", "err", err)
-	}
+	tmos.EnsureDir(dbDir, 0700)
 	resetFilePV(privValKeyFile, privValStateFile, logger)
 }
 
@@ -78,10 +69,7 @@ func resetFilePV(privValKeyFile, privValStateFile string, logger log.Logger) {
 		logger.Info("Reset private validator file to genesis state", "keyFile", privValKeyFile,
 			"stateFile", privValStateFile)
 	} else {
-		pv, err := privval.GenFilePV(privValKeyFile, privValStateFile, keyType)
-		if err != nil {
-			panic(err)
-		}
+		pv := privval.GenFilePV(privValKeyFile, privValStateFile)
 		pv.Save()
 		logger.Info("Generated private validator file", "keyFile", privValKeyFile,
 			"stateFile", privValStateFile)

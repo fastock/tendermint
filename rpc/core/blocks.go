@@ -6,22 +6,16 @@ import (
 	tmmath "github.com/tendermint/tendermint/libs/math"
 	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 	rpctypes "github.com/tendermint/tendermint/rpc/jsonrpc/types"
+	sm "github.com/tendermint/tendermint/state"
 	"github.com/tendermint/tendermint/types"
 )
 
 // BlockchainInfo gets block headers for minHeight <= height <= maxHeight.
-//
-// If maxHeight does not yet exist, blocks up to the current height will be
-// returned. If minHeight does not exist (due to pruning), earliest existing
-// height will be used.
-//
-// At most 20 items will be returned. Block headers are returned in descending
-// order (highest first).
-//
+// Block headers are returned in descending order (highest first).
 // More: https://docs.tendermint.com/master/rpc/#/Info/blockchain
 func BlockchainInfo(ctx *rpctypes.Context, minHeight, maxHeight int64) (*ctypes.ResultBlockchainInfo, error) {
+	// maximum 20 block metas
 	const limit int64 = 20
-
 	var err error
 	minHeight, maxHeight, err = filterMinMax(
 		env.BlockStore.Base(),
@@ -32,14 +26,12 @@ func BlockchainInfo(ctx *rpctypes.Context, minHeight, maxHeight int64) (*ctypes.
 	if err != nil {
 		return nil, err
 	}
-	env.Logger.Debug("BlockchainInfo", "maxHeight", maxHeight, "minHeight", minHeight)
+	env.Logger.Debug("BlockchainInfoHandler", "maxHeight", maxHeight, "minHeight", minHeight)
 
-	blockMetas := make([]*types.BlockMeta, 0, maxHeight-minHeight+1)
+	blockMetas := []*types.BlockMeta{}
 	for height := maxHeight; height >= minHeight; height-- {
 		blockMeta := env.BlockStore.LoadBlockMeta(height)
-		if blockMeta != nil {
-			blockMetas = append(blockMetas, blockMeta)
-		}
+		blockMetas = append(blockMetas, blockMeta)
 	}
 
 	return &ctypes.ResultBlockchainInfo{
@@ -149,7 +141,7 @@ func BlockResults(ctx *rpctypes.Context, heightPtr *int64) (*ctypes.ResultBlockR
 		return nil, err
 	}
 
-	results, err := env.StateStore.LoadABCIResponses(height)
+	results, err := sm.LoadABCIResponses(env.StateDB, height)
 	if err != nil {
 		return nil, err
 	}

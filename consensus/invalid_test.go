@@ -7,7 +7,6 @@ import (
 	"github.com/tendermint/tendermint/libs/log"
 	tmrand "github.com/tendermint/tendermint/libs/rand"
 	"github.com/tendermint/tendermint/p2p"
-	tmproto "github.com/tendermint/tendermint/proto/tendermint/types"
 	"github.com/tendermint/tendermint/types"
 )
 
@@ -19,7 +18,7 @@ import (
 func TestReactorInvalidPrecommit(t *testing.T) {
 	N := 4
 	css, cleanup := randConsensusNet(N, "consensus_reactor_test", newMockTickerFunc(true), newCounter)
-	t.Cleanup(cleanup)
+	defer cleanup()
 
 	for i := 0; i < 4; i++ {
 		ticker := NewTimeoutTicker()
@@ -39,11 +38,11 @@ func TestReactorInvalidPrecommit(t *testing.T) {
 	// and otherwise disable the priv validator
 	byzVal.mtx.Lock()
 	pv := byzVal.privValidator
-	byzVal.doPrevote = func(height int64, round int32) {
+	byzVal.doPrevote = func(height int64, round int) {
 		invalidDoPrevoteFunc(t, height, round, byzVal, byzR.Switch, pv)
 	}
 	byzVal.mtx.Unlock()
-	t.Cleanup(func() { stopConsensusNet(log.TestingLogger(), reactors, eventBuses) })
+	defer stopConsensusNet(log.TestingLogger(), reactors, eventBuses)
 
 	// wait for a bunch of blocks
 	// TODO: make this tighter by ensuring the halt happens by block 2
@@ -54,7 +53,7 @@ func TestReactorInvalidPrecommit(t *testing.T) {
 	}
 }
 
-func invalidDoPrevoteFunc(t *testing.T, height int64, round int32, cs *State, sw *p2p.Switch, pv types.PrivValidator) {
+func invalidDoPrevoteFunc(t *testing.T, height int64, round int, cs *State, sw *p2p.Switch, pv types.PrivValidator) {
 	// routine to:
 	// - precommit for a random block
 	// - send precommit to all peers
@@ -77,24 +76,19 @@ func invalidDoPrevoteFunc(t *testing.T, height int64, round int32, cs *State, sw
 			Height:           cs.Height,
 			Round:            cs.Round,
 			Timestamp:        cs.voteTime(),
-			Type:             tmproto.PrecommitType,
+			Type:             types.PrecommitType,
 			BlockID: types.BlockID{
-				Hash:          blockHash,
-				PartSetHeader: types.PartSetHeader{Total: 1, Hash: tmrand.Bytes(32)}},
+				Hash:        blockHash,
+				PartsHeader: types.PartSetHeader{Total: 1, Hash: tmrand.Bytes(32)}},
 		}
-		p := precommit.ToProto()
-		err = cs.privValidator.SignVote(cs.state.ChainID, p)
-		if err != nil {
-			t.Error(err)
-		}
-		precommit.Signature = p.Signature
+		cs.privValidator.SignVote(cs.state.ChainID, precommit)
 		cs.privValidator = nil // disable priv val so we don't do normal votes
 		cs.mtx.Unlock()
 
 		peers := sw.Peers().List()
 		for _, peer := range peers {
 			cs.Logger.Info("Sending bad vote", "block", blockHash, "peer", peer)
-			peer.Send(VoteChannel, MustEncode(&VoteMessage{precommit}))
+			peer.Send(VoteChannel, cdc.MustMarshalBinaryBare(&VoteMessage{precommit}))
 		}
 	}()
 }

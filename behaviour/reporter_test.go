@@ -11,7 +11,7 @@ import (
 // TestMockReporter tests the MockReporter's ability to store reported
 // peer behaviour in memory indexed by the peerID.
 func TestMockReporter(t *testing.T) {
-	var peerID p2p.NodeID = "MockPeer"
+	var peerID p2p.ID = "MockPeer"
 	pr := bh.NewMockReporter()
 
 	behaviours := pr.GetBehaviours(peerID)
@@ -20,9 +20,7 @@ func TestMockReporter(t *testing.T) {
 	}
 
 	badMessage := bh.BadMessage(peerID, "bad message")
-	if err := pr.Report(badMessage); err != nil {
-		t.Error(err)
-	}
+	pr.Report(badMessage)
 	behaviours = pr.GetBehaviours(peerID)
 	if len(behaviours) != 1 {
 		t.Error("Expected the peer have one reported behaviour")
@@ -34,7 +32,7 @@ func TestMockReporter(t *testing.T) {
 }
 
 type scriptItem struct {
-	peerID    p2p.NodeID
+	peerID    p2p.ID
 	behaviour bh.PeerBehaviour
 }
 
@@ -76,10 +74,10 @@ func equalBehaviours(a []bh.PeerBehaviour, b []bh.PeerBehaviour) bool {
 // freequencies that those behaviours occur.
 func TestEqualPeerBehaviours(t *testing.T) {
 	var (
-		peerID        p2p.NodeID = "MockPeer"
-		consensusVote            = bh.ConsensusVote(peerID, "voted")
-		blockPart                = bh.BlockPart(peerID, "blocked")
-		equals                   = []struct {
+		peerID        p2p.ID = "MockPeer"
+		consensusVote        = bh.ConsensusVote(peerID, "voted")
+		blockPart            = bh.BlockPart(peerID, "blocked")
+		equals               = []struct {
 			left  []bh.PeerBehaviour
 			right []bh.PeerBehaviour
 		}{
@@ -128,7 +126,7 @@ func TestEqualPeerBehaviours(t *testing.T) {
 func TestMockPeerBehaviourReporterConcurrency(t *testing.T) {
 	var (
 		behaviourScript = []struct {
-			peerID     p2p.NodeID
+			peerID     p2p.ID
 			behaviours []bh.PeerBehaviour
 		}{
 			{"1", []bh.PeerBehaviour{bh.ConsensusVote("1", "")}},
@@ -166,9 +164,7 @@ func TestMockPeerBehaviourReporterConcurrency(t *testing.T) {
 			for {
 				select {
 				case pb := <-scriptItems:
-					if err := pr.Report(pb.behaviour); err != nil {
-						t.Error(err)
-					}
+					pr.Report(pb.behaviour)
 				case <-done:
 					return
 				}

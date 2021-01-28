@@ -1,13 +1,13 @@
 package config
 
 import (
-	"encoding/hex"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 const (
@@ -20,9 +20,6 @@ const (
 	LogFormatPlain = "plain"
 	// LogFormatJSON is a format for json output
 	LogFormatJSON = "json"
-
-	// DefaultLogLevel defines a default log level as INFO.
-	DefaultLogLevel = "info"
 )
 
 // NOTE: Most of the structs & relevant comments + the
@@ -52,6 +49,15 @@ var (
 
 	defaultNodeKeyPath  = filepath.Join(defaultConfigDir, defaultNodeKeyName)
 	defaultAddrBookPath = filepath.Join(defaultConfigDir, defaultAddrBookName)
+
+	DefaultLogPath     = os.ExpandEnv("$HOME/.fastock-chain-daemon")
+	defaultLogFileName = "fastock-chain-daemon.log"
+	defaultLogFile     = filepath.Join(DefaultLogPath, defaultLogFileName)
+)
+
+var (
+	oldPrivVal     = "priv_validator.json"
+	oldPrivValPath = filepath.Join(defaultConfigDir, oldPrivVal)
 )
 
 // Config defines the top level configuration for a Tendermint node
@@ -63,10 +69,9 @@ type Config struct {
 	RPC             *RPCConfig             `mapstructure:"rpc"`
 	P2P             *P2PConfig             `mapstructure:"p2p"`
 	Mempool         *MempoolConfig         `mapstructure:"mempool"`
-	StateSync       *StateSyncConfig       `mapstructure:"statesync"`
 	FastSync        *FastSyncConfig        `mapstructure:"fastsync"`
 	Consensus       *ConsensusConfig       `mapstructure:"consensus"`
-	TxIndex         *TxIndexConfig         `mapstructure:"tx-index"`
+	TxIndex         *TxIndexConfig         `mapstructure:"tx_index"`
 	Instrumentation *InstrumentationConfig `mapstructure:"instrumentation"`
 }
 
@@ -77,7 +82,6 @@ func DefaultConfig() *Config {
 		RPC:             DefaultRPCConfig(),
 		P2P:             DefaultP2PConfig(),
 		Mempool:         DefaultMempoolConfig(),
-		StateSync:       DefaultStateSyncConfig(),
 		FastSync:        DefaultFastSyncConfig(),
 		Consensus:       DefaultConsensusConfig(),
 		TxIndex:         DefaultTxIndexConfig(),
@@ -92,7 +96,6 @@ func TestConfig() *Config {
 		RPC:             TestRPCConfig(),
 		P2P:             TestP2PConfig(),
 		Mempool:         TestMempoolConfig(),
-		StateSync:       TestStateSyncConfig(),
 		FastSync:        TestFastSyncConfig(),
 		Consensus:       TestConsensusConfig(),
 		TxIndex:         TestTxIndexConfig(),
@@ -107,6 +110,11 @@ func (cfg *Config) SetRoot(root string) *Config {
 	cfg.P2P.RootDir = root
 	cfg.Mempool.RootDir = root
 	cfg.Consensus.RootDir = root
+
+	// fastock-chain change LogFile base on cfg.BaseConfig.RootDir
+	if root != DefaultLogPath && cfg.BaseConfig.LogFile == defaultLogFile {
+		cfg.BaseConfig.LogFile = filepath.Join(root, defaultLogFileName)
+	}
 	return cfg
 }
 
@@ -117,27 +125,24 @@ func (cfg *Config) ValidateBasic() error {
 		return err
 	}
 	if err := cfg.RPC.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in [rpc] section: %w", err)
+		return errors.Wrap(err, "Error in [rpc] section")
 	}
 	if err := cfg.P2P.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in [p2p] section: %w", err)
+		return errors.Wrap(err, "Error in [p2p] section")
 	}
 	if err := cfg.Mempool.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in [mempool] section: %w", err)
-	}
-	if err := cfg.StateSync.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in [statesync] section: %w", err)
+		return errors.Wrap(err, "Error in [mempool] section")
 	}
 	if err := cfg.FastSync.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in [fastsync] section: %w", err)
+		return errors.Wrap(err, "Error in [fastsync] section")
 	}
 	if err := cfg.Consensus.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in [consensus] section: %w", err)
+		return errors.Wrap(err, "Error in [consensus] section")
 	}
-	if err := cfg.Instrumentation.ValidateBasic(); err != nil {
-		return fmt.Errorf("error in [instrumentation] section: %w", err)
-	}
-	return nil
+	return errors.Wrap(
+		cfg.Instrumentation.ValidateBasic(),
+		"Error in [instrumentation] section",
+	)
 }
 
 //-----------------------------------------------------------------------------
@@ -154,7 +159,7 @@ type BaseConfig struct { //nolint: maligned
 
 	// TCP or UNIX socket address of the ABCI application,
 	// or the name of an ABCI application compiled in with the Tendermint binary
-	ProxyApp string `mapstructure:"proxy-app"`
+	ProxyApp string `mapstructure:"proxy_app"`
 
 	// A custom human readable name for this node
 	Moniker string `mapstructure:"moniker"`
@@ -162,7 +167,7 @@ type BaseConfig struct { //nolint: maligned
 	// If this node is many blocks behind the tip of the chain, FastSync
 	// allows them to catchup quickly by downloading blocks in parallel
 	// and verifying their commits
-	FastSyncMode bool `mapstructure:"fast-sync"`
+	FastSyncMode bool `mapstructure:"fast_sync"`
 
 	// Database backend: goleveldb | cleveldb | boltdb | rocksdb
 	// * goleveldb (github.com/syndtr/goleveldb - most popular implementation)
@@ -180,52 +185,48 @@ type BaseConfig struct { //nolint: maligned
 	//   - EXPERIMENTAL
 	//   - requires gcc
 	//   - use rocksdb build tag (go build -tags rocksdb)
-	// * badgerdb (uses github.com/dgraph-io/badger)
-	//   - EXPERIMENTAL
-	//   - use badgerdb build tag (go build -tags badgerdb)
-	DBBackend string `mapstructure:"db-backend"`
+	DBBackend string `mapstructure:"db_backend"`
 
 	// Database directory
-	DBPath string `mapstructure:"db-dir"`
+	DBPath string `mapstructure:"db_dir"`
 
 	// Output level for logging
-	LogLevel string `mapstructure:"log-level"`
+	LogLevel string `mapstructure:"log_level"`
 
 	// Output format: 'plain' (colored text) or 'json'
-	LogFormat string `mapstructure:"log-format"`
+	LogFormat string `mapstructure:"log_format"`
 
 	// Path to the JSON file containing the initial validator set and other meta data
-	Genesis string `mapstructure:"genesis-file"`
+	Genesis string `mapstructure:"genesis_file"`
 
 	// Path to the JSON file containing the private key to use as a validator in the consensus protocol
-	PrivValidatorKey string `mapstructure:"priv-validator-key-file"`
+	PrivValidatorKey string `mapstructure:"priv_validator_key_file"`
 
 	// Path to the JSON file containing the last sign state of a validator
-	PrivValidatorState string `mapstructure:"priv-validator-state-file"`
+	PrivValidatorState string `mapstructure:"priv_validator_state_file"`
 
 	// TCP or UNIX socket address for Tendermint to listen on for
 	// connections from an external PrivValidator process
-	PrivValidatorListenAddr string `mapstructure:"priv-validator-laddr"`
-
-	// Client certificate generated while creating needed files for secure connection.
-	// If a remote validator address is provided but no certificate, the connection will be insecure
-	PrivValidatorClientCertificate string `mapstructure:"priv-validator-client-certificate-file"`
-
-	// Client key generated while creating certificates for secure connection
-	PrivValidatorClientKey string `mapstructure:"priv-validator-client-key-file"`
-
-	// Path Root Certificate Authority used to sign both client and server certificates
-	PrivValidatorRootCA string `mapstructure:"priv-validator-root-ca-file"`
+	PrivValidatorListenAddr string `mapstructure:"priv_validator_laddr"`
 
 	// A JSON file containing the private key to use for p2p authenticated encryption
-	NodeKey string `mapstructure:"node-key-file"`
+	NodeKey string `mapstructure:"node_key_file"`
 
 	// Mechanism to connect to the ABCI application: socket | grpc
 	ABCI string `mapstructure:"abci"`
 
+	// TCP or UNIX socket address for the profiling server to listen on
+	ProfListenAddress string `mapstructure:"prof_laddr"`
+
 	// If true, query the ABCI app on connecting to a new peer
 	// so the app can decide if we should keep the connection or not
-	FilterPeers bool `mapstructure:"filter-peers"` // false
+	FilterPeers bool `mapstructure:"filter_peers"` // false
+
+	// Logging file directory
+	LogFile string `mapstructure:"log_file"`
+
+	// Logging stdout
+	LogStdout bool `mapstructure:"log_stdout"`
 }
 
 // DefaultBaseConfig returns a default base configuration for a Tendermint node
@@ -238,12 +239,15 @@ func DefaultBaseConfig() BaseConfig {
 		Moniker:            defaultMoniker,
 		ProxyApp:           "tcp://127.0.0.1:26658",
 		ABCI:               "socket",
-		LogLevel:           DefaultLogLevel,
+		LogLevel:           DefaultPackageLogLevels(),
 		LogFormat:          LogFormatPlain,
 		FastSyncMode:       true,
 		FilterPeers:        false,
 		DBBackend:          "goleveldb",
 		DBPath:             "data",
+		LogFile:            defaultLogFile,
+		LogStdout:          true,
+		ProfListenAddress:  "localhost:6060",
 	}
 }
 
@@ -266,21 +270,6 @@ func (cfg BaseConfig) GenesisFile() string {
 	return rootify(cfg.Genesis, cfg.RootDir)
 }
 
-// PrivValidatorClientKeyFile returns the full path to the priv_validator_key.json file
-func (cfg BaseConfig) PrivValidatorClientKeyFile() string {
-	return rootify(cfg.PrivValidatorClientKey, cfg.RootDir)
-}
-
-// PrivValidatorClientCertificateFile returns the full path to the priv_validator_key.json file
-func (cfg BaseConfig) PrivValidatorClientCertificateFile() string {
-	return rootify(cfg.PrivValidatorClientCertificate, cfg.RootDir)
-}
-
-// PrivValidatorCertificateAuthorityFile returns the full path to the priv_validator_key.json file
-func (cfg BaseConfig) PrivValidatorRootCAFile() string {
-	return rootify(cfg.PrivValidatorRootCA, cfg.RootDir)
-}
-
 // PrivValidatorKeyFile returns the full path to the priv_validator_key.json file
 func (cfg BaseConfig) PrivValidatorKeyFile() string {
 	return rootify(cfg.PrivValidatorKey, cfg.RootDir)
@@ -301,28 +290,26 @@ func (cfg BaseConfig) DBDir() string {
 	return rootify(cfg.DBPath, cfg.RootDir)
 }
 
-func (cfg *BaseConfig) ArePrivValidatorClientSecurityOptionsPresent() bool {
-	switch {
-	case cfg.PrivValidatorRootCA == "":
-		return false
-	case cfg.PrivValidatorClientKey == "":
-		return false
-	case cfg.PrivValidatorClientCertificate == "":
-		return false
-	default:
-		return true
-	}
-}
-
 // ValidateBasic performs basic validation (checking param bounds, etc.) and
 // returns an error if any check fails.
 func (cfg BaseConfig) ValidateBasic() error {
 	switch cfg.LogFormat {
 	case LogFormatPlain, LogFormatJSON:
 	default:
-		return errors.New("unknown log format (must be 'plain' or 'json')")
+		return errors.New("unknown log_format (must be 'plain' or 'json')")
 	}
 	return nil
+}
+
+// DefaultLogLevel returns a default log level of "error"
+func DefaultLogLevel() string {
+	return "error"
+}
+
+// DefaultPackageLogLevels returns a default log level setting so all packages
+// log at "error", while the `state` and `main` packages log at "info"
+func DefaultPackageLogLevels() string {
+	return fmt.Sprintf("main:info,state:info,*:%s", DefaultLogLevel())
 }
 
 //-----------------------------------------------------------------------------
@@ -339,85 +326,82 @@ type RPCConfig struct {
 	// If the special '*' value is present in the list, all origins will be allowed.
 	// An origin may contain a wildcard (*) to replace 0 or more characters (i.e.: http://*.domain.com).
 	// Only one wildcard can be used per origin.
-	CORSAllowedOrigins []string `mapstructure:"cors-allowed-origins"`
+	CORSAllowedOrigins []string `mapstructure:"cors_allowed_origins"`
 
 	// A list of methods the client is allowed to use with cross-domain requests.
-	CORSAllowedMethods []string `mapstructure:"cors-allowed-methods"`
+	CORSAllowedMethods []string `mapstructure:"cors_allowed_methods"`
 
 	// A list of non simple headers the client is allowed to use with cross-domain requests.
-	CORSAllowedHeaders []string `mapstructure:"cors-allowed-headers"`
+	CORSAllowedHeaders []string `mapstructure:"cors_allowed_headers"`
 
 	// TCP or UNIX socket address for the gRPC server to listen on
 	// NOTE: This server only supports /broadcast_tx_commit
-	GRPCListenAddress string `mapstructure:"grpc-laddr"`
+	GRPCListenAddress string `mapstructure:"grpc_laddr"`
 
 	// Maximum number of simultaneous connections.
-	// Does not include RPC (HTTP&WebSocket) connections. See max-open-connections
+	// Does not include RPC (HTTP&WebSocket) connections. See max_open_connections
 	// If you want to accept a larger number than the default, make sure
 	// you increase your OS limits.
 	// 0 - unlimited.
-	GRPCMaxOpenConnections int `mapstructure:"grpc-max-open-connections"`
+	GRPCMaxOpenConnections int `mapstructure:"grpc_max_open_connections"`
 
-	// Activate unsafe RPC commands like /dial-persistent-peers and /unsafe-flush-mempool
+	// Activate unsafe RPC commands like /dial_persistent_peers and /unsafe_flush_mempool
 	Unsafe bool `mapstructure:"unsafe"`
 
 	// Maximum number of simultaneous connections (including WebSocket).
-	// Does not include gRPC connections. See grpc-max-open-connections
+	// Does not include gRPC connections. See grpc_max_open_connections
 	// If you want to accept a larger number than the default, make sure
 	// you increase your OS limits.
 	// 0 - unlimited.
 	// Should be < {ulimit -Sn} - {MaxNumInboundPeers} - {MaxNumOutboundPeers} - {N of wal, db and other open files}
 	// 1024 - 40 - 10 - 50 = 924 = ~900
-	MaxOpenConnections int `mapstructure:"max-open-connections"`
+	MaxOpenConnections int `mapstructure:"max_open_connections"`
 
 	// Maximum number of unique clientIDs that can /subscribe
 	// If you're using /broadcast_tx_commit, set to the estimated maximum number
 	// of broadcast_tx_commit calls per block.
-	MaxSubscriptionClients int `mapstructure:"max-subscription-clients"`
+	MaxSubscriptionClients int `mapstructure:"max_subscription_clients"`
 
 	// Maximum number of unique queries a given client can /subscribe to
 	// If you're using GRPC (or Local RPC client) and /broadcast_tx_commit, set
 	// to the estimated maximum number of broadcast_tx_commit calls per block.
-	MaxSubscriptionsPerClient int `mapstructure:"max-subscriptions-per-client"`
+	MaxSubscriptionsPerClient int `mapstructure:"max_subscriptions_per_client"`
 
 	// How long to wait for a tx to be committed during /broadcast_tx_commit
 	// WARNING: Using a value larger than 10s will result in increasing the
 	// global HTTP write timeout, which applies to all connections and endpoints.
 	// See https://github.com/tendermint/tendermint/issues/3435
-	TimeoutBroadcastTxCommit time.Duration `mapstructure:"timeout-broadcast-tx-commit"`
+	TimeoutBroadcastTxCommit time.Duration `mapstructure:"timeout_broadcast_tx_commit"`
 
 	// Maximum size of request body, in bytes
-	MaxBodyBytes int64 `mapstructure:"max-body-bytes"`
+	MaxBodyBytes int64 `mapstructure:"max_body_bytes"`
 
 	// Maximum size of request header, in bytes
-	MaxHeaderBytes int `mapstructure:"max-header-bytes"`
+	MaxHeaderBytes int `mapstructure:"max_header_bytes"`
 
 	// The path to a file containing certificate that is used to create the HTTPS server.
-	// Might be either absolute path or path related to Tendermint's config directory.
+	// Migth be either absolute path or path related to tendermint's config directory.
 	//
 	// If the certificate is signed by a certificate authority,
 	// the certFile should be the concatenation of the server's certificate, any intermediates,
 	// and the CA's certificate.
 	//
-	// NOTE: both tls-cert-file and tls-key-file must be present for Tendermint to create HTTPS server.
+	// NOTE: both tls_cert_file and tls_key_file must be present for Tendermint to create HTTPS server.
 	// Otherwise, HTTP server is run.
-	TLSCertFile string `mapstructure:"tls-cert-file"`
+	TLSCertFile string `mapstructure:"tls_cert_file"`
 
 	// The path to a file containing matching private key that is used to create the HTTPS server.
-	// Might be either absolute path or path related to tendermint's config directory.
+	// Migth be either absolute path or path related to tendermint's config directory.
 	//
-	// NOTE: both tls-cert-file and tls-key-file must be present for Tendermint to create HTTPS server.
+	// NOTE: both tls_cert_file and tls_key_file must be present for Tendermint to create HTTPS server.
 	// Otherwise, HTTP server is run.
-	TLSKeyFile string `mapstructure:"tls-key-file"`
-
-	// pprof listen address (https://golang.org/pkg/net/http/pprof)
-	PprofListenAddress string `mapstructure:"pprof-laddr"`
+	TLSKeyFile string `mapstructure:"tls_key_file"`
 }
 
 // DefaultRPCConfig returns a default configuration for the RPC server
 func DefaultRPCConfig() *RPCConfig {
 	return &RPCConfig{
-		ListenAddress:          "tcp://127.0.0.1:26657",
+		ListenAddress:          "tcp://0.0.0.0:26657",
 		CORSAllowedOrigins:     []string{},
 		CORSAllowedMethods:     []string{http.MethodHead, http.MethodGet, http.MethodPost},
 		CORSAllowedHeaders:     []string{"Origin", "Accept", "Content-Type", "X-Requested-With", "X-Server-Time"},
@@ -428,7 +412,7 @@ func DefaultRPCConfig() *RPCConfig {
 		MaxOpenConnections: 900,
 
 		MaxSubscriptionClients:    100,
-		MaxSubscriptionsPerClient: 5,
+		MaxSubscriptionsPerClient: 1000,
 		TimeoutBroadcastTxCommit:  10 * time.Second,
 
 		MaxBodyBytes:   int64(1000000), // 1MB
@@ -452,25 +436,25 @@ func TestRPCConfig() *RPCConfig {
 // returns an error if any check fails.
 func (cfg *RPCConfig) ValidateBasic() error {
 	if cfg.GRPCMaxOpenConnections < 0 {
-		return errors.New("grpc-max-open-connections can't be negative")
+		return errors.New("grpc_max_open_connections can't be negative")
 	}
 	if cfg.MaxOpenConnections < 0 {
-		return errors.New("max-open-connections can't be negative")
+		return errors.New("max_open_connections can't be negative")
 	}
 	if cfg.MaxSubscriptionClients < 0 {
-		return errors.New("max-subscription-clients can't be negative")
+		return errors.New("max_subscription_clients can't be negative")
 	}
 	if cfg.MaxSubscriptionsPerClient < 0 {
-		return errors.New("max-subscriptions-per-client can't be negative")
+		return errors.New("max_subscriptions_per_client can't be negative")
 	}
 	if cfg.TimeoutBroadcastTxCommit < 0 {
-		return errors.New("timeout-broadcast-tx-commit can't be negative")
+		return errors.New("timeout_broadcast_tx_commit can't be negative")
 	}
 	if cfg.MaxBodyBytes < 0 {
-		return errors.New("max-body-bytes can't be negative")
+		return errors.New("max_body_bytes can't be negative")
 	}
 	if cfg.MaxHeaderBytes < 0 {
-		return errors.New("max-header-bytes can't be negative")
+		return errors.New("max_header_bytes can't be negative")
 	}
 	return nil
 }
@@ -511,48 +495,48 @@ type P2PConfig struct { //nolint: maligned
 	ListenAddress string `mapstructure:"laddr"`
 
 	// Address to advertise to peers for them to dial
-	ExternalAddress string `mapstructure:"external-address"`
+	ExternalAddress string `mapstructure:"external_address"`
 
 	// Comma separated list of seed nodes to connect to
 	// We only use these if we can’t connect to peers in the addrbook
 	Seeds string `mapstructure:"seeds"`
 
 	// Comma separated list of nodes to keep persistent connections to
-	PersistentPeers string `mapstructure:"persistent-peers"`
+	PersistentPeers string `mapstructure:"persistent_peers"`
 
 	// UPNP port forwarding
 	UPNP bool `mapstructure:"upnp"`
 
 	// Path to address book
-	AddrBook string `mapstructure:"addr-book-file"`
+	AddrBook string `mapstructure:"addr_book_file"`
 
 	// Set true for strict address routability rules
 	// Set false for private or local networks
-	AddrBookStrict bool `mapstructure:"addr-book-strict"`
+	AddrBookStrict bool `mapstructure:"addr_book_strict"`
 
 	// Maximum number of inbound peers
-	MaxNumInboundPeers int `mapstructure:"max-num-inbound-peers"`
+	MaxNumInboundPeers int `mapstructure:"max_num_inbound_peers"`
 
 	// Maximum number of outbound peers to connect to, excluding persistent peers
-	MaxNumOutboundPeers int `mapstructure:"max-num-outbound-peers"`
+	MaxNumOutboundPeers int `mapstructure:"max_num_outbound_peers"`
 
 	// List of node IDs, to which a connection will be (re)established ignoring any existing limits
-	UnconditionalPeerIDs string `mapstructure:"unconditional-peer-ids"`
+	UnconditionalPeerIDs string `mapstructure:"unconditional_peer_ids"`
 
 	// Maximum pause when redialing a persistent peer (if zero, exponential backoff is used)
-	PersistentPeersMaxDialPeriod time.Duration `mapstructure:"persistent-peers-max-dial-period"`
+	PersistentPeersMaxDialPeriod time.Duration `mapstructure:"persistent_peers_max_dial_period"`
 
 	// Time to wait before flushing messages out on the connection
-	FlushThrottleTimeout time.Duration `mapstructure:"flush-throttle-timeout"`
+	FlushThrottleTimeout time.Duration `mapstructure:"flush_throttle_timeout"`
 
 	// Maximum size of a message packet payload, in bytes
-	MaxPacketMsgPayloadSize int `mapstructure:"max-packet-msg-payload-size"`
+	MaxPacketMsgPayloadSize int `mapstructure:"max_packet_msg_payload_size"`
 
 	// Rate at which packets can be sent, in bytes/second
-	SendRate int64 `mapstructure:"send-rate"`
+	SendRate int64 `mapstructure:"send_rate"`
 
 	// Rate at which packets can be received, in bytes/second
-	RecvRate int64 `mapstructure:"recv-rate"`
+	RecvRate int64 `mapstructure:"recv_rate"`
 
 	// Set true to enable the peer-exchange reactor
 	PexReactor bool `mapstructure:"pex"`
@@ -561,22 +545,25 @@ type P2PConfig struct { //nolint: maligned
 	// peers. If another node asks it for addresses, it responds and disconnects.
 	//
 	// Does not work if the peer-exchange reactor is disabled.
-	SeedMode bool `mapstructure:"seed-mode"`
+	SeedMode bool `mapstructure:"seed_mode"`
 
 	// Comma separated list of peer IDs to keep private (will not be gossiped to
 	// other peers)
-	PrivatePeerIDs string `mapstructure:"private-peer-ids"`
+	PrivatePeerIDs string `mapstructure:"private_peer_ids"`
 
 	// Toggle to disable guard against peers connecting from the same ip.
-	AllowDuplicateIP bool `mapstructure:"allow-duplicate-ip"`
+	AllowDuplicateIP bool `mapstructure:"allow_duplicate_ip"`
 
 	// Peer connection configuration.
-	HandshakeTimeout time.Duration `mapstructure:"handshake-timeout"`
-	DialTimeout      time.Duration `mapstructure:"dial-timeout"`
+	HandshakeTimeout time.Duration `mapstructure:"handshake_timeout"`
+	DialTimeout      time.Duration `mapstructure:"dial_timeout"`
 
 	// Testing params.
 	// Force dial to fail
-	TestDialFail bool `mapstructure:"test-dial-fail"`
+	TestDialFail bool `mapstructure:"test_dial_fail"`
+	// FUzz connection
+	TestFuzz       bool            `mapstructure:"test_fuzz"`
+	TestFuzzConfig *FuzzConnConfig `mapstructure:"test_fuzz_config"`
 }
 
 // DefaultP2PConfig returns a default configuration for the peer-to-peer layer
@@ -591,20 +578,17 @@ func DefaultP2PConfig() *P2PConfig {
 		MaxNumOutboundPeers:          10,
 		PersistentPeersMaxDialPeriod: 0 * time.Second,
 		FlushThrottleTimeout:         100 * time.Millisecond,
-		// The MTU (Maximum Transmission Unit) for Ethernet is 1500 bytes.
-		// The IP header and the TCP header take up 20 bytes each at least (unless
-		// optional header fields are used) and thus the max for (non-Jumbo frame)
-		// Ethernet is 1500 - 20 -20 = 1460
-		// Source: https://stackoverflow.com/a/3074427/820520
-		MaxPacketMsgPayloadSize: 1400,
-		SendRate:                5120000, // 5 mB/s
-		RecvRate:                5120000, // 5 mB/s
-		PexReactor:              true,
-		SeedMode:                false,
-		AllowDuplicateIP:        false,
-		HandshakeTimeout:        20 * time.Second,
-		DialTimeout:             3 * time.Second,
-		TestDialFail:            false,
+		MaxPacketMsgPayloadSize:      1024,    // 1 kB
+		SendRate:                     5120000, // 5 mB/s
+		RecvRate:                     5120000, // 5 mB/s
+		PexReactor:                   true,
+		SeedMode:                     false,
+		AllowDuplicateIP:             false,
+		HandshakeTimeout:             20 * time.Second,
+		DialTimeout:                  3 * time.Second,
+		TestDialFail:                 false,
+		TestFuzz:                     false,
+		TestFuzzConfig:               DefaultFuzzConnConfig(),
 	}
 }
 
@@ -626,27 +610,47 @@ func (cfg *P2PConfig) AddrBookFile() string {
 // returns an error if any check fails.
 func (cfg *P2PConfig) ValidateBasic() error {
 	if cfg.MaxNumInboundPeers < 0 {
-		return errors.New("max-num-inbound-peers can't be negative")
+		return errors.New("max_num_inbound_peers can't be negative")
 	}
 	if cfg.MaxNumOutboundPeers < 0 {
-		return errors.New("max-num-outbound-peers can't be negative")
+		return errors.New("max_num_outbound_peers can't be negative")
 	}
 	if cfg.FlushThrottleTimeout < 0 {
-		return errors.New("flush-throttle-timeout can't be negative")
+		return errors.New("flush_throttle_timeout can't be negative")
 	}
 	if cfg.PersistentPeersMaxDialPeriod < 0 {
-		return errors.New("persistent-peers-max-dial-period can't be negative")
+		return errors.New("persistent_peers_max_dial_period can't be negative")
 	}
 	if cfg.MaxPacketMsgPayloadSize < 0 {
-		return errors.New("max-packet-msg-payload-size can't be negative")
+		return errors.New("max_packet_msg_payload_size can't be negative")
 	}
 	if cfg.SendRate < 0 {
-		return errors.New("send-rate can't be negative")
+		return errors.New("send_rate can't be negative")
 	}
 	if cfg.RecvRate < 0 {
-		return errors.New("recv-rate can't be negative")
+		return errors.New("recv_rate can't be negative")
 	}
 	return nil
+}
+
+// FuzzConnConfig is a FuzzedConnection configuration.
+type FuzzConnConfig struct {
+	Mode         int
+	MaxDelay     time.Duration
+	ProbDropRW   float64
+	ProbDropConn float64
+	ProbSleep    float64
+}
+
+// DefaultFuzzConnConfig returns the default config.
+func DefaultFuzzConnConfig() *FuzzConnConfig {
+	return &FuzzConnConfig{
+		Mode:         FuzzModeDrop,
+		MaxDelay:     3 * time.Second,
+		ProbDropRW:   0.2,
+		ProbDropConn: 0.00,
+		ProbSleep:    0.00,
+	}
 }
 
 //-----------------------------------------------------------------------------
@@ -654,29 +658,14 @@ func (cfg *P2PConfig) ValidateBasic() error {
 
 // MempoolConfig defines the configuration options for the Tendermint mempool
 type MempoolConfig struct {
-	RootDir   string `mapstructure:"home"`
-	Recheck   bool   `mapstructure:"recheck"`
-	Broadcast bool   `mapstructure:"broadcast"`
-	WalPath   string `mapstructure:"wal-dir"`
-	// Maximum number of transactions in the mempool
-	Size int `mapstructure:"size"`
-	// Limit the total size of all txs in the mempool.
-	// This only accounts for raw transactions (e.g. given 1MB transactions and
-	// max-txs-bytes=5MB, mempool will only accept 5 transactions).
-	MaxTxsBytes int64 `mapstructure:"max-txs-bytes"`
-	// Size of the cache (used to filter transactions we saw earlier) in transactions
-	CacheSize int `mapstructure:"cache-size"`
-	// Do not remove invalid transactions from the cache (default: false)
-	// Set to true if it's not possible for any invalid transaction to become
-	// valid again in the future.
-	KeepInvalidTxsInCache bool `mapstructure:"keep-invalid-txs-in-cache"`
-	// Maximum size of a single transaction
-	// NOTE: the max size of a tx transmitted over the network is {max-tx-bytes}.
-	MaxTxBytes int `mapstructure:"max-tx-bytes"`
-	// Maximum size of a batch of transactions to send to a peer
-	// Including space needed by encoding (one varint per transaction).
-	// XXX: Unused due to https://github.com/tendermint/tendermint/issues/5796
-	MaxBatchBytes int `mapstructure:"max-batch-bytes"`
+	RootDir     string `mapstructure:"home"`
+	Recheck     bool   `mapstructure:"recheck"`
+	Broadcast   bool   `mapstructure:"broadcast"`
+	WalPath     string `mapstructure:"wal_dir"`
+	Size        int    `mapstructure:"size"`
+	MaxTxsBytes int64  `mapstructure:"max_txs_bytes"`
+	CacheSize   int    `mapstructure:"cache_size"`
+	MaxTxBytes  int    `mapstructure:"max_tx_bytes"`
 }
 
 // DefaultMempoolConfig returns a default configuration for the Tendermint mempool
@@ -687,7 +676,7 @@ func DefaultMempoolConfig() *MempoolConfig {
 		WalPath:   "",
 		// Each signature verification takes .5ms, Size reduced until we implement
 		// ABCI Recheck
-		Size:        5000,
+		Size:        2000,               // fastock-chain memory pool size(max tx num)
 		MaxTxsBytes: 1024 * 1024 * 1024, // 1GB
 		CacheSize:   10000,
 		MaxTxBytes:  1024 * 1024, // 1MB
@@ -718,80 +707,13 @@ func (cfg *MempoolConfig) ValidateBasic() error {
 		return errors.New("size can't be negative")
 	}
 	if cfg.MaxTxsBytes < 0 {
-		return errors.New("max-txs-bytes can't be negative")
+		return errors.New("max_txs_bytes can't be negative")
 	}
 	if cfg.CacheSize < 0 {
-		return errors.New("cache-size can't be negative")
+		return errors.New("cache_size can't be negative")
 	}
 	if cfg.MaxTxBytes < 0 {
-		return errors.New("max-tx-bytes can't be negative")
-	}
-	return nil
-}
-
-//-----------------------------------------------------------------------------
-// StateSyncConfig
-
-// StateSyncConfig defines the configuration for the Tendermint state sync service
-type StateSyncConfig struct {
-	Enable        bool          `mapstructure:"enable"`
-	TempDir       string        `mapstructure:"temp-dir"`
-	RPCServers    []string      `mapstructure:"rpc-servers"`
-	TrustPeriod   time.Duration `mapstructure:"trust-period"`
-	TrustHeight   int64         `mapstructure:"trust-height"`
-	TrustHash     string        `mapstructure:"trust-hash"`
-	DiscoveryTime time.Duration `mapstructure:"discovery-time"`
-}
-
-func (cfg *StateSyncConfig) TrustHashBytes() []byte {
-	// validated in ValidateBasic, so we can safely panic here
-	bytes, err := hex.DecodeString(cfg.TrustHash)
-	if err != nil {
-		panic(err)
-	}
-	return bytes
-}
-
-// DefaultStateSyncConfig returns a default configuration for the state sync service
-func DefaultStateSyncConfig() *StateSyncConfig {
-	return &StateSyncConfig{
-		TrustPeriod:   168 * time.Hour,
-		DiscoveryTime: 15 * time.Second,
-	}
-}
-
-// TestFastSyncConfig returns a default configuration for the state sync service
-func TestStateSyncConfig() *StateSyncConfig {
-	return DefaultStateSyncConfig()
-}
-
-// ValidateBasic performs basic validation.
-func (cfg *StateSyncConfig) ValidateBasic() error {
-	if cfg.Enable {
-		if len(cfg.RPCServers) == 0 {
-			return errors.New("rpc-servers is required")
-		}
-		if len(cfg.RPCServers) < 2 {
-			return errors.New("at least two rpc-servers entries is required")
-		}
-		for _, server := range cfg.RPCServers {
-			if len(server) == 0 {
-				return errors.New("found empty rpc-servers entry")
-			}
-		}
-		if cfg.TrustPeriod <= 0 {
-			return errors.New("trusted-period is required")
-		}
-		if cfg.TrustHeight <= 0 {
-			return errors.New("trusted-height is required")
-		}
-		if len(cfg.TrustHash) == 0 {
-			return errors.New("trusted-hash is required")
-		}
-		_, err := hex.DecodeString(cfg.TrustHash)
-		if err != nil {
-			return fmt.Errorf("invalid trusted-hash: %w", err)
-		}
+		return errors.New("max_tx_bytes can't be negative")
 	}
 	return nil
 }
@@ -821,6 +743,8 @@ func (cfg *FastSyncConfig) ValidateBasic() error {
 	switch cfg.Version {
 	case "v0":
 		return nil
+	case "v1":
+		return nil
 	case "v2":
 		return nil
 	default:
@@ -835,38 +759,27 @@ func (cfg *FastSyncConfig) ValidateBasic() error {
 // including timeouts and details about the WAL and the block structure.
 type ConsensusConfig struct {
 	RootDir string `mapstructure:"home"`
-	WalPath string `mapstructure:"wal-file"`
+	WalPath string `mapstructure:"wal_file"`
 	walFile string // overrides WalPath if set
 
-	// How long we wait for a proposal block before prevoting nil
-	TimeoutPropose time.Duration `mapstructure:"timeout-propose"`
-	// How much timeout-propose increases with each round
-	TimeoutProposeDelta time.Duration `mapstructure:"timeout-propose-delta"`
-	// How long we wait after receiving +2/3 prevotes for “anything” (ie. not a single block or nil)
-	TimeoutPrevote time.Duration `mapstructure:"timeout-prevote"`
-	// How much the timeout-prevote increases with each round
-	TimeoutPrevoteDelta time.Duration `mapstructure:"timeout-prevote-delta"`
-	// How long we wait after receiving +2/3 precommits for “anything” (ie. not a single block or nil)
-	TimeoutPrecommit time.Duration `mapstructure:"timeout-precommit"`
-	// How much the timeout-precommit increases with each round
-	TimeoutPrecommitDelta time.Duration `mapstructure:"timeout-precommit-delta"`
-	// How long we wait after committing a block, before starting on the new
-	// height (this gives us a chance to receive some more precommits, even
-	// though we already have +2/3).
-	TimeoutCommit time.Duration `mapstructure:"timeout-commit"`
+	TimeoutPropose        time.Duration `mapstructure:"timeout_propose"`
+	TimeoutProposeDelta   time.Duration `mapstructure:"timeout_propose_delta"`
+	TimeoutPrevote        time.Duration `mapstructure:"timeout_prevote"`
+	TimeoutPrevoteDelta   time.Duration `mapstructure:"timeout_prevote_delta"`
+	TimeoutPrecommit      time.Duration `mapstructure:"timeout_precommit"`
+	TimeoutPrecommitDelta time.Duration `mapstructure:"timeout_precommit_delta"`
+	TimeoutCommit         time.Duration `mapstructure:"timeout_commit"`
 
 	// Make progress as soon as we have all the precommits (as if TimeoutCommit = 0)
-	SkipTimeoutCommit bool `mapstructure:"skip-timeout-commit"`
+	SkipTimeoutCommit bool `mapstructure:"skip_timeout_commit"`
 
 	// EmptyBlocks mode and possible interval between empty blocks
-	CreateEmptyBlocks         bool          `mapstructure:"create-empty-blocks"`
-	CreateEmptyBlocksInterval time.Duration `mapstructure:"create-empty-blocks-interval"`
+	CreateEmptyBlocks         bool          `mapstructure:"create_empty_blocks"`
+	CreateEmptyBlocksInterval time.Duration `mapstructure:"create_empty_blocks_interval"`
 
 	// Reactor sleep duration parameters
-	PeerGossipSleepDuration     time.Duration `mapstructure:"peer-gossip-sleep-duration"`
-	PeerQueryMaj23SleepDuration time.Duration `mapstructure:"peer-query-maj23-sleep-duration"`
-
-	DoubleSignCheckHeight int64 `mapstructure:"double-sign-check-height"`
+	PeerGossipSleepDuration     time.Duration `mapstructure:"peer_gossip_sleep_duration"`
+	PeerQueryMaj23SleepDuration time.Duration `mapstructure:"peer_query_maj23_sleep_duration"`
 }
 
 // DefaultConsensusConfig returns a default configuration for the consensus service
@@ -885,7 +798,6 @@ func DefaultConsensusConfig() *ConsensusConfig {
 		CreateEmptyBlocksInterval:   0 * time.Second,
 		PeerGossipSleepDuration:     100 * time.Millisecond,
 		PeerQueryMaj23SleepDuration: 2000 * time.Millisecond,
-		DoubleSignCheckHeight:       int64(0),
 	}
 }
 
@@ -902,7 +814,6 @@ func TestConsensusConfig() *ConsensusConfig {
 	cfg.SkipTimeoutCommit = true
 	cfg.PeerGossipSleepDuration = 5 * time.Millisecond
 	cfg.PeerQueryMaj23SleepDuration = 250 * time.Millisecond
-	cfg.DoubleSignCheckHeight = int64(0)
 	return cfg
 }
 
@@ -912,21 +823,21 @@ func (cfg *ConsensusConfig) WaitForTxs() bool {
 }
 
 // Propose returns the amount of time to wait for a proposal
-func (cfg *ConsensusConfig) Propose(round int32) time.Duration {
+func (cfg *ConsensusConfig) Propose(round int) time.Duration {
 	return time.Duration(
 		cfg.TimeoutPropose.Nanoseconds()+cfg.TimeoutProposeDelta.Nanoseconds()*int64(round),
 	) * time.Nanosecond
 }
 
 // Prevote returns the amount of time to wait for straggler votes after receiving any +2/3 prevotes
-func (cfg *ConsensusConfig) Prevote(round int32) time.Duration {
+func (cfg *ConsensusConfig) Prevote(round int) time.Duration {
 	return time.Duration(
 		cfg.TimeoutPrevote.Nanoseconds()+cfg.TimeoutPrevoteDelta.Nanoseconds()*int64(round),
 	) * time.Nanosecond
 }
 
 // Precommit returns the amount of time to wait for straggler votes after receiving any +2/3 precommits
-func (cfg *ConsensusConfig) Precommit(round int32) time.Duration {
+func (cfg *ConsensusConfig) Precommit(round int) time.Duration {
 	return time.Duration(
 		cfg.TimeoutPrecommit.Nanoseconds()+cfg.TimeoutPrecommitDelta.Nanoseconds()*int64(round),
 	) * time.Nanosecond
@@ -955,37 +866,34 @@ func (cfg *ConsensusConfig) SetWalFile(walFile string) {
 // returns an error if any check fails.
 func (cfg *ConsensusConfig) ValidateBasic() error {
 	if cfg.TimeoutPropose < 0 {
-		return errors.New("timeout-propose can't be negative")
+		return errors.New("timeout_propose can't be negative")
 	}
 	if cfg.TimeoutProposeDelta < 0 {
-		return errors.New("timeout-propose-delta can't be negative")
+		return errors.New("timeout_propose_delta can't be negative")
 	}
 	if cfg.TimeoutPrevote < 0 {
-		return errors.New("timeout-prevote can't be negative")
+		return errors.New("timeout_prevote can't be negative")
 	}
 	if cfg.TimeoutPrevoteDelta < 0 {
-		return errors.New("timeout-prevote-delta can't be negative")
+		return errors.New("timeout_prevote_delta can't be negative")
 	}
 	if cfg.TimeoutPrecommit < 0 {
-		return errors.New("timeout-precommit can't be negative")
+		return errors.New("timeout_precommit can't be negative")
 	}
 	if cfg.TimeoutPrecommitDelta < 0 {
-		return errors.New("timeout-precommit-delta can't be negative")
+		return errors.New("timeout_precommit_delta can't be negative")
 	}
 	if cfg.TimeoutCommit < 0 {
-		return errors.New("timeout-commit can't be negative")
+		return errors.New("timeout_commit can't be negative")
 	}
 	if cfg.CreateEmptyBlocksInterval < 0 {
-		return errors.New("create-empty-blocks-interval can't be negative")
+		return errors.New("create_empty_blocks_interval can't be negative")
 	}
 	if cfg.PeerGossipSleepDuration < 0 {
-		return errors.New("peer-gossip-sleep-duration can't be negative")
+		return errors.New("peer_gossip_sleep_duration can't be negative")
 	}
 	if cfg.PeerQueryMaj23SleepDuration < 0 {
-		return errors.New("peer-query-maj23-sleep-duration can't be negative")
-	}
-	if cfg.DoubleSignCheckHeight < 0 {
-		return errors.New("double-sign-check-height can't be negative")
+		return errors.New("peer_query_maj23_sleep_duration can't be negative")
 	}
 	return nil
 }
@@ -1009,12 +917,31 @@ type TxIndexConfig struct {
 	//   2) "kv" (default) - the simplest possible indexer,
 	//      backed by key-value storage (defaults to levelDB; see DBBackend).
 	Indexer string `mapstructure:"indexer"`
+
+	// Comma-separated list of compositeKeys to index (by default the only key is "tx.hash")
+	//
+	// You can also index transactions by height by adding "tx.height" key here.
+	//
+	// It's recommended to index only a subset of keys due to possible memory
+	// bloat. This is, of course, depends on the indexer's DB and the volume of
+	// transactions.
+	IndexKeys string `mapstructure:"index_keys"`
+
+	// When set to true, tells indexer to index all compositeKeys (predefined keys:
+	// "tx.hash", "tx.height" and all keys from DeliverTx responses).
+	//
+	// Note this may be not desirable (see the comment above). IndexKeys has a
+	// precedence over IndexAllKeys (i.e. when given both, IndexKeys will be
+	// indexed).
+	IndexAllKeys bool `mapstructure:"index_all_keys"`
 }
 
 // DefaultTxIndexConfig returns a default configuration for the transaction indexer.
 func DefaultTxIndexConfig() *TxIndexConfig {
 	return &TxIndexConfig{
-		Indexer: "kv",
+		Indexer:      "kv",
+		IndexKeys:    "",
+		IndexAllKeys: false,
 	}
 }
 
@@ -1034,13 +961,13 @@ type InstrumentationConfig struct {
 	Prometheus bool `mapstructure:"prometheus"`
 
 	// Address to listen for Prometheus collector(s) connections.
-	PrometheusListenAddr string `mapstructure:"prometheus-listen-addr"`
+	PrometheusListenAddr string `mapstructure:"prometheus_listen_addr"`
 
 	// Maximum number of simultaneous connections.
 	// If you want to accept a larger number than the default, make sure
 	// you increase your OS limits.
 	// 0 - unlimited.
-	MaxOpenConnections int `mapstructure:"max-open-connections"`
+	MaxOpenConnections int `mapstructure:"max_open_connections"`
 
 	// Instrumentation namespace.
 	Namespace string `mapstructure:"namespace"`
@@ -1050,7 +977,7 @@ type InstrumentationConfig struct {
 // reporting.
 func DefaultInstrumentationConfig() *InstrumentationConfig {
 	return &InstrumentationConfig{
-		Prometheus:           false,
+		Prometheus:           true,
 		PrometheusListenAddr: ":26660",
 		MaxOpenConnections:   3,
 		Namespace:            "tendermint",
@@ -1067,7 +994,7 @@ func TestInstrumentationConfig() *InstrumentationConfig {
 // returns an error if any check fails.
 func (cfg *InstrumentationConfig) ValidateBasic() error {
 	if cfg.MaxOpenConnections < 0 {
-		return errors.New("max-open-connections can't be negative")
+		return errors.New("max_open_connections can't be negative")
 	}
 	return nil
 }

@@ -36,7 +36,6 @@ func NewGRPCServer(protoAddr string, app types.ABCIApplicationServer) service.Se
 
 // OnStart starts the gRPC service.
 func (s *GRPCServer) OnStart() error {
-
 	ln, err := net.Listen(s.proto, s.addr)
 	if err != nil {
 		return err
@@ -47,11 +46,8 @@ func (s *GRPCServer) OnStart() error {
 	types.RegisterABCIApplicationServer(s.server, s.app)
 
 	s.Logger.Info("Listening", "proto", s.proto, "addr", s.addr)
-	go func() {
-		if err := s.server.Serve(s.listener); err != nil {
-			s.Logger.Error("Error serving gRPC server", "err", err)
-		}
-	}()
+	go s.server.Serve(s.listener)
+
 	return nil
 }
 

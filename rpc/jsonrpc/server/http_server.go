@@ -4,7 +4,6 @@ package server
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"golang.org/x/net/netutil"
 
 	"github.com/tendermint/tendermint/libs/log"
@@ -89,9 +89,6 @@ func ServeTLS(
 	return err
 }
 
-// WriteRPCResponseHTTPError marshals res as JSON and writes it to w.
-//
-// Panics if it can't Marshal res or write to w.
 func WriteRPCResponseHTTPError(
 	w http.ResponseWriter,
 	httpCode int,
@@ -109,18 +106,8 @@ func WriteRPCResponseHTTPError(
 	}
 }
 
-// WriteRPCResponseHTTP marshals res as JSON and writes it to w.
-//
-// Panics if it can't Marshal res or write to w.
-func WriteRPCResponseHTTP(w http.ResponseWriter, res ...types.RPCResponse) {
-	var v interface{}
-	if len(res) == 1 {
-		v = res[0]
-	} else {
-		v = res
-	}
-
-	jsonBytes, err := json.MarshalIndent(v, "", "  ")
+func WriteRPCResponseHTTP(w http.ResponseWriter, res types.RPCResponse) {
+	jsonBytes, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		panic(err)
 	}
@@ -128,6 +115,25 @@ func WriteRPCResponseHTTP(w http.ResponseWriter, res ...types.RPCResponse) {
 	w.WriteHeader(200)
 	if _, err := w.Write(jsonBytes); err != nil {
 		panic(err)
+	}
+}
+
+// WriteRPCResponseArrayHTTP will do the same as WriteRPCResponseHTTP, except it
+// can write arrays of responses for batched request/response interactions via
+// the JSON RPC.
+func WriteRPCResponseArrayHTTP(w http.ResponseWriter, res []types.RPCResponse) {
+	if len(res) == 1 {
+		WriteRPCResponseHTTP(w, res[0])
+	} else {
+		jsonBytes, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			panic(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		if _, err := w.Write(jsonBytes); err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -239,7 +245,7 @@ func (h maxBytesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func Listen(addr string, config *Config) (listener net.Listener, err error) {
 	parts := strings.SplitN(addr, "://", 2)
 	if len(parts) != 2 {
-		return nil, fmt.Errorf(
+		return nil, errors.Errorf(
 			"invalid listening address %s (use fully formed addresses, including the tcp:// or unix:// prefix)",
 			addr,
 		)
@@ -247,7 +253,7 @@ func Listen(addr string, config *Config) (listener net.Listener, err error) {
 	proto, addr := parts[0], parts[1]
 	listener, err = net.Listen(proto, addr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to listen on %v: %v", addr, err)
+		return nil, errors.Errorf("failed to listen on %v: %v", addr, err)
 	}
 	if config.MaxOpenConnections > 0 {
 		listener = netutil.LimitListener(listener, config.MaxOpenConnections)

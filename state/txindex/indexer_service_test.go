@@ -22,48 +22,37 @@ func TestIndexerServiceIndexesBlocks(t *testing.T) {
 	eventBus.SetLogger(log.TestingLogger())
 	err := eventBus.Start()
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		if err := eventBus.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
+	defer eventBus.Stop()
 
 	// tx indexer
 	store := db.NewMemDB()
-	txIndexer := kv.NewTxIndex(store)
+	txIndexer := kv.NewTxIndex(store, kv.IndexAllEvents())
 
 	service := txindex.NewIndexerService(txIndexer, eventBus)
 	service.SetLogger(log.TestingLogger())
 	err = service.Start()
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		if err := service.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
+	defer service.Stop()
 
 	// publish block with txs
-	err = eventBus.PublishEventNewBlockHeader(types.EventDataNewBlockHeader{
+	eventBus.PublishEventNewBlockHeader(types.EventDataNewBlockHeader{
 		Header: types.Header{Height: 1},
 		NumTxs: int64(2),
 	})
-	require.NoError(t, err)
-	txResult1 := &abci.TxResult{
+	txResult1 := &types.TxResult{
 		Height: 1,
 		Index:  uint32(0),
 		Tx:     types.Tx("foo"),
 		Result: abci.ResponseDeliverTx{Code: 0},
 	}
-	err = eventBus.PublishEventTx(types.EventDataTx{TxResult: *txResult1})
-	require.NoError(t, err)
-	txResult2 := &abci.TxResult{
+	eventBus.PublishEventTx(types.EventDataTx{TxResult: *txResult1})
+	txResult2 := &types.TxResult{
 		Height: 1,
 		Index:  uint32(1),
 		Tx:     types.Tx("bar"),
 		Result: abci.ResponseDeliverTx{Code: 0},
 	}
-	err = eventBus.PublishEventTx(types.EventDataTx{TxResult: *txResult2})
-	require.NoError(t, err)
+	eventBus.PublishEventTx(types.EventDataTx{TxResult: *txResult2})
 
 	time.Sleep(100 * time.Millisecond)
 

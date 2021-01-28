@@ -1,11 +1,12 @@
 package client
 
 import (
-	"context"
-	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strings"
+
+	"github.com/pkg/errors"
+
+	amino "github.com/tendermint/go-amino"
 
 	types "github.com/tendermint/tendermint/rpc/jsonrpc/types"
 )
@@ -18,10 +19,14 @@ const (
 // URIClient is a JSON-RPC client, which sends POST form HTTP requests to the
 // remote server.
 //
+// Request values are amino encoded. Response is expected to be amino encoded.
+// New amino codec is used if no other codec was set using SetCodec.
+//
 // URIClient is safe for concurrent use by multiple goroutines.
 type URIClient struct {
 	address string
 	client  *http.Client
+	cdc     *amino.Codec
 }
 
 var _ HTTPClient = (*URIClient)(nil)
@@ -45,41 +50,32 @@ func NewURI(remote string) (*URIClient, error) {
 	uriClient := &URIClient{
 		address: parsedURL.GetTrimmedURL(),
 		client:  httpClient,
+		cdc:     amino.NewCodec(),
 	}
 
 	return uriClient, nil
 }
 
 // Call issues a POST form HTTP request.
-func (c *URIClient) Call(ctx context.Context, method string,
-	params map[string]interface{}, result interface{}) (interface{}, error) {
-
-	values, err := argsToURLValues(params)
+func (c *URIClient) Call(method string, params map[string]interface{}, result interface{}) (interface{}, error) {
+	values, err := argsToURLValues(c.cdc, params)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode params: %w", err)
+		return nil, errors.Wrap(err, "failed to encode params")
 	}
 
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		c.address+"/"+method,
-		strings.NewReader(values.Encode()),
-	)
+	resp, err := c.client.PostForm(c.address+"/"+method, values)
 	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
+		return nil, errors.Wrap(err, "PostForm failed")
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("post: %w", err)
-	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() // nolint: errcheck
 
 	responseBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
+		return nil, errors.Wrap(err, "failed to read response body")
 	}
 
-	return unmarshalResponseBytes(responseBytes, URIClientRequestID, result)
+	return unmarshalResponseBytes(c.cdc, responseBytes, URIClientRequestID, result)
 }
+
+func (c *URIClient) Codec() *amino.Codec       { return c.cdc }
+func (c *URIClient) SetCodec(cdc *amino.Codec) { c.cdc = cdc }

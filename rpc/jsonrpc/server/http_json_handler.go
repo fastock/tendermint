@@ -9,24 +9,28 @@ import (
 	"reflect"
 	"sort"
 
-	tmjson "github.com/tendermint/tendermint/libs/json"
+	"github.com/pkg/errors"
+
+	amino "github.com/tendermint/go-amino"
+
 	"github.com/tendermint/tendermint/libs/log"
 	types "github.com/tendermint/tendermint/rpc/jsonrpc/types"
 )
 
+///////////////////////////////////////////////////////////////////////////////
 // HTTP + JSON handler
+///////////////////////////////////////////////////////////////////////////////
 
 // jsonrpc calls grab the given method's function info and runs reflect.Call
-func makeJSONRPCHandler(funcMap map[string]*RPCFunc, logger log.Logger) http.HandlerFunc {
+func makeJSONRPCHandler(funcMap map[string]*RPCFunc, cdc *amino.Codec, logger log.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		b, err := ioutil.ReadAll(r.Body)
 		if err != nil {
-			WriteRPCResponseHTTPError(
+			WriteRPCResponseHTTP(
 				w,
-				http.StatusBadRequest,
 				types.RPCInvalidRequestError(
 					nil,
-					fmt.Errorf("error reading request body: %w", err),
+					errors.Wrap(err, "error reading request body"),
 				),
 			)
 			return
@@ -48,11 +52,10 @@ func makeJSONRPCHandler(funcMap map[string]*RPCFunc, logger log.Logger) http.Han
 			// next, try to unmarshal as a single request
 			var request types.RPCRequest
 			if err := json.Unmarshal(b, &request); err != nil {
-				WriteRPCResponseHTTPError(
+				WriteRPCResponseHTTP(
 					w,
-					http.StatusInternalServerError,
 					types.RPCParseError(
-						fmt.Errorf("error unmarshalling request: %w", err),
+						errors.Wrap(err, "error unmarshalling request"),
 					),
 				)
 				return
@@ -75,7 +78,7 @@ func makeJSONRPCHandler(funcMap map[string]*RPCFunc, logger log.Logger) http.Han
 			if len(r.URL.Path) > 1 {
 				responses = append(
 					responses,
-					types.RPCInvalidRequestError(request.ID, fmt.Errorf("path %s is invalid", r.URL.Path)),
+					types.RPCInvalidRequestError(request.ID, errors.Errorf("path %s is invalid", r.URL.Path)),
 				)
 				continue
 			}
@@ -87,11 +90,11 @@ func makeJSONRPCHandler(funcMap map[string]*RPCFunc, logger log.Logger) http.Han
 			ctx := &types.Context{JSONReq: &request, HTTPReq: r}
 			args := []reflect.Value{reflect.ValueOf(ctx)}
 			if len(request.Params) > 0 {
-				fnArgs, err := jsonParamsToArgs(rpcFunc, request.Params)
+				fnArgs, err := jsonParamsToArgs(rpcFunc, cdc, request.Params)
 				if err != nil {
 					responses = append(
 						responses,
-						types.RPCInvalidParamsError(request.ID, fmt.Errorf("error converting json params to arguments: %w", err)),
+						types.RPCInvalidParamsError(request.ID, errors.Wrap(err, "error converting json params to arguments")),
 					)
 					continue
 				}
@@ -104,10 +107,10 @@ func makeJSONRPCHandler(funcMap map[string]*RPCFunc, logger log.Logger) http.Han
 				responses = append(responses, types.RPCInternalError(request.ID, err))
 				continue
 			}
-			responses = append(responses, types.NewRPCSuccessResponse(request.ID, result))
+			responses = append(responses, types.NewRPCSuccessResponse(cdc, request.ID, result))
 		}
 		if len(responses) > 0 {
-			WriteRPCResponseHTTP(w, responses...)
+			WriteRPCResponseArrayHTTP(w, responses)
 		}
 	}
 }
@@ -127,6 +130,7 @@ func handleInvalidJSONRPCPaths(next http.HandlerFunc) http.HandlerFunc {
 
 func mapParamsToArgs(
 	rpcFunc *RPCFunc,
+	cdc *amino.Codec,
 	params map[string]json.RawMessage,
 	argsOffset int,
 ) ([]reflect.Value, error) {
@@ -137,7 +141,7 @@ func mapParamsToArgs(
 
 		if p, ok := params[argName]; ok && p != nil && len(p) > 0 {
 			val := reflect.New(argType)
-			err := tmjson.Unmarshal(p, val.Interface())
+			err := cdc.UnmarshalJSON(p, val.Interface())
 			if err != nil {
 				return nil, err
 			}
@@ -152,12 +156,13 @@ func mapParamsToArgs(
 
 func arrayParamsToArgs(
 	rpcFunc *RPCFunc,
+	cdc *amino.Codec,
 	params []json.RawMessage,
 	argsOffset int,
 ) ([]reflect.Value, error) {
 
 	if len(rpcFunc.argNames) != len(params) {
-		return nil, fmt.Errorf("expected %v parameters (%v), got %v (%v)",
+		return nil, errors.Errorf("expected %v parameters (%v), got %v (%v)",
 			len(rpcFunc.argNames), rpcFunc.argNames, len(params), params)
 	}
 
@@ -165,7 +170,7 @@ func arrayParamsToArgs(
 	for i, p := range params {
 		argType := rpcFunc.args[i+argsOffset]
 		val := reflect.New(argType)
-		err := tmjson.Unmarshal(p, val.Interface())
+		err := cdc.UnmarshalJSON(p, val.Interface())
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +185,7 @@ func arrayParamsToArgs(
 // Example:
 //   rpcFunc.args = [rpctypes.Context string]
 //   rpcFunc.argNames = ["arg"]
-func jsonParamsToArgs(rpcFunc *RPCFunc, raw []byte) ([]reflect.Value, error) {
+func jsonParamsToArgs(rpcFunc *RPCFunc, cdc *amino.Codec, raw []byte) ([]reflect.Value, error) {
 	const argsOffset = 1
 
 	// TODO: Make more efficient, perhaps by checking the first character for '{' or '['?
@@ -188,18 +193,18 @@ func jsonParamsToArgs(rpcFunc *RPCFunc, raw []byte) ([]reflect.Value, error) {
 	var m map[string]json.RawMessage
 	err := json.Unmarshal(raw, &m)
 	if err == nil {
-		return mapParamsToArgs(rpcFunc, m, argsOffset)
+		return mapParamsToArgs(rpcFunc, cdc, m, argsOffset)
 	}
 
 	// Otherwise, try an array.
 	var a []json.RawMessage
 	err = json.Unmarshal(raw, &a)
 	if err == nil {
-		return arrayParamsToArgs(rpcFunc, a, argsOffset)
+		return arrayParamsToArgs(rpcFunc, cdc, a, argsOffset)
 	}
 
 	// Otherwise, bad format, we cannot parse
-	return nil, fmt.Errorf("unknown type for JSON params: %v. Expected map or array", err)
+	return nil, errors.Errorf("unknown type for JSON params: %v. Expected map or array", err)
 }
 
 // writes a list of available rpc endpoints as an html page

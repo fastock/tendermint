@@ -7,14 +7,4 @@ parent:
 
 # Overview
 
-This section dives into the internals of Go-Tendermint.
-
-- [Using Tendermint](./using-tendermint.md)
-- [Running in Production](./running-in-production.md)
-- [Subscribing to events](./subscription.md)
-- [Block Structure](./block-structure.md)
-- [RPC](./rpc.md)
-- [Fast Sync](./fast-sync.md)
-- [State Sync](./state-sync.md)
-- [Mempool](./mempool.md)
-- [Light Client](./light-client.md)
+See the side-bar for details on the various features of Tendermint Core.

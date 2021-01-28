@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -123,17 +122,12 @@ func TestMempoolConfigValidateBasic(t *testing.T) {
 	}
 }
 
-func TestStateSyncConfigValidateBasic(t *testing.T) {
-	cfg := TestStateSyncConfig()
-	require.NoError(t, cfg.ValidateBasic())
-}
-
 func TestFastSyncConfigValidateBasic(t *testing.T) {
 	cfg := TestFastSyncConfig()
 	assert.NoError(t, cfg.ValidateBasic())
 
 	// tamper with version
-	cfg.Version = "v2"
+	cfg.Version = "v1"
 	assert.NoError(t, cfg.ValidateBasic())
 
 	cfg.Version = "invalid"
@@ -164,7 +158,6 @@ func TestConsensusConfig_ValidateBasic(t *testing.T) {
 		"PeerGossipSleepDuration negative":     {func(c *ConsensusConfig) { c.PeerGossipSleepDuration = -1 }, true},
 		"PeerQueryMaj23SleepDuration":          {func(c *ConsensusConfig) { c.PeerQueryMaj23SleepDuration = time.Second }, false},
 		"PeerQueryMaj23SleepDuration negative": {func(c *ConsensusConfig) { c.PeerQueryMaj23SleepDuration = -1 }, true},
-		"DoubleSignCheckHeight negative":       {func(c *ConsensusConfig) { c.DoubleSignCheckHeight = -1 }, true},
 	}
 	for desc, tc := range testcases {
 		tc := tc // appease linter

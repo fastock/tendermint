@@ -50,7 +50,6 @@ type SignerDialerEndpoint struct {
 func NewSignerDialerEndpoint(
 	logger log.Logger,
 	dialer SocketDialer,
-	options ...SignerServiceEndpointOption,
 ) *SignerDialerEndpoint {
 
 	sd := &SignerDialerEndpoint{
@@ -61,10 +60,6 @@ func NewSignerDialerEndpoint(
 
 	sd.BaseService = *service.NewBaseService(logger, "SignerDialerEndpoint", sd)
 	sd.signerEndpoint.timeoutReadWrite = defaultTimeoutReadWriteSeconds * time.Second
-
-	for _, optionFunc := range options {
-		optionFunc(sd)
-	}
 
 	return sd
 }

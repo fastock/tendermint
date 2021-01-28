@@ -1,7 +1,7 @@
 package abcicli_test
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -16,32 +16,43 @@ import (
 	"github.com/tendermint/tendermint/libs/service"
 )
 
-var ctx = context.Background()
+type errorStopper interface {
+	StopForError(error)
+}
+
+func TestSocketClientStopForErrorDeadlock(t *testing.T) {
+	c := abcicli.NewSocketClient(":80", false).(errorStopper)
+	err := errors.New("foo-tendermint")
+
+	// See Issue https://github.com/tendermint/abci/issues/114
+	doneChan := make(chan bool)
+	go func() {
+		defer close(doneChan)
+		c.StopForError(err)
+		c.StopForError(err)
+	}()
+
+	select {
+	case <-doneChan:
+	case <-time.After(time.Second * 4):
+		t.Fatalf("Test took too long, potential deadlock still exists")
+	}
+}
 
 func TestProperSyncCalls(t *testing.T) {
 	app := slowApp{}
 
 	s, c := setupClientServer(t, app)
-	t.Cleanup(func() {
-		if err := s.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
-	t.Cleanup(func() {
-		if err := c.Stop(); err != nil {
-			t.Error(err)
-		}
-	})
+	defer s.Stop()
+	defer c.Stop()
 
 	resp := make(chan error, 1)
 	go func() {
 		// This is BeginBlockSync unrolled....
-		reqres, err := c.BeginBlockAsync(ctx, types.RequestBeginBlock{})
-		assert.NoError(t, err)
-		err = c.FlushSync(context.Background())
-		assert.NoError(t, err)
+		reqres := c.BeginBlockAsync(types.RequestBeginBlock{})
+		c.FlushSync()
 		res := reqres.Response.GetBeginBlock()
-		assert.NotNil(t, res)
+		require.NotNil(t, res)
 		resp <- c.Error()
 	}()
 
@@ -58,30 +69,19 @@ func TestHangingSyncCalls(t *testing.T) {
 	app := slowApp{}
 
 	s, c := setupClientServer(t, app)
-	t.Cleanup(func() {
-		if err := s.Stop(); err != nil {
-			t.Log(err)
-		}
-	})
-	t.Cleanup(func() {
-		if err := c.Stop(); err != nil {
-			t.Log(err)
-		}
-	})
+	defer s.Stop()
+	defer c.Stop()
 
 	resp := make(chan error, 1)
 	go func() {
 		// Start BeginBlock and flush it
-		reqres, err := c.BeginBlockAsync(ctx, types.RequestBeginBlock{})
-		assert.NoError(t, err)
-		flush, err := c.FlushAsync(ctx)
-		assert.NoError(t, err)
+		reqres := c.BeginBlockAsync(types.RequestBeginBlock{})
+		flush := c.FlushAsync()
 		// wait 20 ms for all events to travel socket, but
 		// no response yet from server
 		time.Sleep(20 * time.Millisecond)
 		// kill the server, so the connections break
-		err = s.Stop()
-		assert.NoError(t, err)
+		s.Stop()
 
 		// wait for the response from BeginBlock
 		reqres.Wait()

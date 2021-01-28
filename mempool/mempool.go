@@ -1,7 +1,6 @@
 package mempool
 
 import (
-	"context"
 	"fmt"
 
 	abci "github.com/tendermint/tendermint/abci/types"
@@ -98,20 +97,24 @@ type TxInfo struct {
 	// sender, storing 2 bytes with each tx instead of 20 bytes for the p2p.ID.
 	SenderID uint16
 	// SenderP2PID is the actual p2p.ID of the sender, used e.g. for logging.
-	SenderP2PID p2p.NodeID
-	// Context is the optional context to cancel CheckTx
-	Context context.Context
+	SenderP2PID p2p.ID
 }
 
 //--------------------------------------------------------------------------------
 
-// PreCheckMaxBytes checks that the size of the transaction is smaller or equal to the expected maxBytes.
-func PreCheckMaxBytes(maxBytes int64) PreCheckFunc {
+// PreCheckAminoMaxBytes checks that the size of the transaction plus the amino
+// overhead is smaller or equal to the expected maxBytes.
+func PreCheckAminoMaxBytes(maxBytes int64) PreCheckFunc {
 	return func(tx types.Tx) error {
-		txSize := types.ComputeProtoSizeForTxs([]types.Tx{tx})
-
+		// We have to account for the amino overhead in the tx size as well
+		// NOTE: fieldNum = 1 as types.Block.Data contains Txs []Tx as first field.
+		// If this field order ever changes this needs to updated here accordingly.
+		// NOTE: if some []Tx are encoded without a parenting struct, the
+		// fieldNum is also equal to 1.
+		aminoOverhead := types.ComputeAminoOverhead(tx, 1)
+		txSize := int64(len(tx)) + aminoOverhead
 		if txSize > maxBytes {
-			return fmt.Errorf("tx size is too big: %d, max: %d",
+			return fmt.Errorf("tx size (including amino overhead) is too big: %d, max: %d",
 				txSize, maxBytes)
 		}
 		return nil

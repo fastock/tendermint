@@ -1,13 +1,13 @@
 package debug
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -32,14 +32,14 @@ func init() {
 		&frequency,
 		flagFrequency,
 		30,
-		"the frequency (seconds) in which to poll, aggregate and dump Tendermint debug data",
+		"The frequency (seconds) in which to poll, aggregate and dump Tendermint debug data",
 	)
 
 	dumpCmd.Flags().StringVar(
 		&profAddr,
 		flagProfAddr,
 		"",
-		"the profiling server address (<host>:<port>)",
+		"The profiling server address (<host>:<port>)",
 	)
 }
 
@@ -55,13 +55,13 @@ func dumpCmdHandler(_ *cobra.Command, args []string) error {
 
 	if _, err := os.Stat(outDir); os.IsNotExist(err) {
 		if err := os.Mkdir(outDir, os.ModePerm); err != nil {
-			return fmt.Errorf("failed to create output directory: %w", err)
+			return errors.Wrap(err, "failed to create output directory")
 		}
 	}
 
 	rpc, err := rpchttp.New(nodeRPCAddr, "/websocket")
 	if err != nil {
-		return fmt.Errorf("failed to create new http client: %w", err)
+		return errors.Wrap(err, "failed to create new http client")
 	}
 
 	home := viper.GetString(cli.HomeFlag)

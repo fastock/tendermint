@@ -1,9 +1,10 @@
 package privval
 
 import (
-	"errors"
 	"fmt"
 	"net"
+
+	"github.com/pkg/errors"
 
 	"github.com/tendermint/tendermint/crypto/ed25519"
 	"github.com/tendermint/tendermint/libs/log"
@@ -14,11 +15,10 @@ import (
 // report that a connection timeout occurred. This detects both fundamental
 // network timeouts, as well as ErrConnTimeout errors.
 func IsConnTimeout(err error) bool {
-	_, ok := errors.Unwrap(err).(timeoutError)
-	switch {
-	case errors.As(err, &EndpointTimeoutError{}):
+	switch errors.Cause(err).(type) {
+	case EndpointTimeoutError:
 		return true
-	case ok:
+	case timeoutError:
 		return true
 	default:
 		return false

@@ -2,10 +2,9 @@ package log
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"strings"
+	"os"
 	"sync"
 	"time"
 
@@ -47,6 +46,8 @@ func NewTMFmtLogger(w io.Writer) kitlog.Logger {
 	return &tmfmtLogger{w}
 }
 
+var pid = os.Getpid()
+
 func (l tmfmtLogger) Log(keyvals ...interface{}) error {
 	enc := tmfmtEncoderPool.Get().(*tmfmtEncoder)
 	enc.Reset()
@@ -82,11 +83,6 @@ func (l tmfmtLogger) Log(keyvals ...interface{}) error {
 			excludeIndexes = append(excludeIndexes, i)
 			module = keyvals[i+1].(string)
 		}
-
-		// Print []byte as a hexadecimal string (uppercased)
-		if b, ok := keyvals[i+1].([]byte); ok {
-			keyvals[i+1] = strings.ToUpper(hex.EncodeToString(b))
-		}
 	}
 
 	// Form a custom Tendermint line
@@ -98,7 +94,8 @@ func (l tmfmtLogger) Log(keyvals ...interface{}) error {
 	//     D										- first character of the level, uppercase (ASCII only)
 	//     [2016-05-02|11:06:44.322]    - our time format (see https://golang.org/src/time/format.go)
 	//     Stopping ...					- message
-	enc.buf.WriteString(fmt.Sprintf("%c[%s] %-44s ", lvl[0]-32, time.Now().Format("2006-01-02|15:04:05.000"), msg))
+	enc.buf.WriteString(fmt.Sprintf("%c[%s][%d] %-44s ",
+		lvl[0]-32, time.Now().Format("2006-01-02|15:04:05.000"), pid, msg))
 
 	if module != unknown {
 		enc.buf.WriteString("module=" + module + " ")
@@ -114,7 +111,7 @@ KeyvalueLoop:
 
 		err := enc.EncodeKeyval(keyvals[i], keyvals[i+1])
 		if err == logfmt.ErrUnsupportedValueType {
-			enc.EncodeKeyval(keyvals[i], fmt.Sprintf("%+v", keyvals[i+1])) //nolint:errcheck // no need to check error again
+			enc.EncodeKeyval(keyvals[i], fmt.Sprintf("%+v", keyvals[i+1]))
 		} else if err != nil {
 			return err
 		}

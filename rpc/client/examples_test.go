@@ -2,7 +2,6 @@ package client_test
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"log"
 
@@ -22,7 +21,7 @@ func ExampleHTTP_simple() {
 	rpcAddr := rpctest.GetConfig().RPC.ListenAddress
 	c, err := rpchttp.New(rpcAddr, "/websocket")
 	if err != nil {
-		log.Fatal(err) //nolint:gocritic
+		log.Fatal(err)
 	}
 
 	// Create a transaction
@@ -32,7 +31,7 @@ func ExampleHTTP_simple() {
 
 	// Broadcast the transaction and wait for it to commit (rather use
 	// c.BroadcastTxSync though in production).
-	bres, err := c.BroadcastTxCommit(context.Background(), tx)
+	bres, err := c.BroadcastTxCommit(tx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -41,7 +40,7 @@ func ExampleHTTP_simple() {
 	}
 
 	// Now try to fetch the value for the key
-	qres, err := c.ABCIQuery(context.Background(), "/key", k)
+	qres, err := c.ABCIQuery("/key", k)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -69,6 +68,7 @@ func ExampleHTTP_batching() {
 	// Start a tendermint node (and kvstore) in the background to test against
 	app := kvstore.NewApplication()
 	node := rpctest.StartTendermint(app, rpctest.SuppressStdout, rpctest.RecreateConfig)
+	defer rpctest.StopTendermint(node)
 
 	// Create our RPC client
 	rpcAddr := rpctest.GetConfig().RPC.ListenAddress
@@ -76,8 +76,6 @@ func ExampleHTTP_batching() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	defer rpctest.StopTendermint(node)
 
 	// Create our two transactions
 	k1 := []byte("firstName")
@@ -97,26 +95,26 @@ func ExampleHTTP_batching() {
 	for _, tx := range txs {
 		// Broadcast the transaction and wait for it to commit (rather use
 		// c.BroadcastTxSync though in production).
-		if _, err := batch.BroadcastTxCommit(context.Background(), tx); err != nil {
-			log.Fatal(err) //nolint:gocritic
+		if _, err := batch.BroadcastTxCommit(tx); err != nil {
+			log.Fatal(err)
 		}
 	}
 
 	// Send the batch of 2 transactions
-	if _, err := batch.Send(context.Background()); err != nil {
+	if _, err := batch.Send(); err != nil {
 		log.Fatal(err)
 	}
 
 	// Now let's query for the original results as a batch
 	keys := [][]byte{k1, k2}
 	for _, key := range keys {
-		if _, err := batch.ABCIQuery(context.Background(), "/key", key); err != nil {
+		if _, err := batch.ABCIQuery("/key", key); err != nil {
 			log.Fatal(err)
 		}
 	}
 
 	// Send the 2 queries and keep the results
-	results, err := batch.Send(context.Background())
+	results, err := batch.Send()
 	if err != nil {
 		log.Fatal(err)
 	}

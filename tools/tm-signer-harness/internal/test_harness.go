@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -17,7 +16,6 @@ import (
 	"github.com/tendermint/tendermint/libs/log"
 	tmnet "github.com/tendermint/tendermint/libs/net"
 	tmos "github.com/tendermint/tendermint/libs/os"
-	tmproto "github.com/tendermint/tendermint/proto/tendermint/types"
 	"github.com/tendermint/tendermint/types"
 )
 
@@ -36,7 +34,7 @@ const (
 	ErrTestSignVoteFailed                 // 10
 )
 
-var voteTypes = []tmproto.SignedMsgType{tmproto.PrevoteType, tmproto.PrecommitType}
+var voteTypes = []types.SignedMsgType{types.PrevoteType, types.PrecommitType}
 
 // TestHarnessError allows us to keep track of which exit code should be used
 // when exiting the main program.
@@ -74,7 +72,7 @@ type TestHarnessConfig struct {
 	ConnDeadline   time.Duration
 	AcceptRetries  int
 
-	SecretConnKey ed25519.PrivKey
+	SecretConnKey ed25519.PrivKeyEd25519
 
 	ExitWhenComplete bool // Whether or not to call os.Exit when the harness has completed.
 }
@@ -109,7 +107,7 @@ func NewTestHarness(logger log.Logger, cfg TestHarnessConfig) (*TestHarness, err
 		return nil, newTestHarnessError(ErrFailedToCreateListener, err, "")
 	}
 
-	signerClient, err := privval.NewSignerClient(spv, st.ChainID)
+	signerClient, err := privval.NewSignerClient(spv)
 	if err != nil {
 		return nil, newTestHarnessError(ErrFailedToCreateListener, err, "")
 	}
@@ -202,7 +200,7 @@ func (th *TestHarness) TestPublicKey() error {
 		return err
 	}
 	th.logger.Info("Remote", "pubKey", sck)
-	if !bytes.Equal(fpvk.Bytes(), sck.Bytes()) {
+	if fpvk != sck {
 		th.logger.Error("FAILED: Local and remote public keys do not match")
 		return newTestHarnessError(ErrTestPublicKeyFailed, nil, "")
 	}
@@ -216,26 +214,24 @@ func (th *TestHarness) TestSignProposal() error {
 	// sha256 hash of "hash"
 	hash := tmhash.Sum([]byte("hash"))
 	prop := &types.Proposal{
-		Type:     tmproto.ProposalType,
+		Type:     types.ProposalType,
 		Height:   100,
 		Round:    0,
 		POLRound: -1,
 		BlockID: types.BlockID{
 			Hash: hash,
-			PartSetHeader: types.PartSetHeader{
+			PartsHeader: types.PartSetHeader{
 				Hash:  hash,
 				Total: 1000000,
 			},
 		},
 		Timestamp: time.Now(),
 	}
-	p := prop.ToProto()
-	propBytes := types.ProposalSignBytes(th.chainID, p)
-	if err := th.signerClient.SignProposal(th.chainID, p); err != nil {
+	propBytes := prop.SignBytes(th.chainID)
+	if err := th.signerClient.SignProposal(th.chainID, prop); err != nil {
 		th.logger.Error("FAILED: Signing of proposal", "err", err)
 		return newTestHarnessError(ErrTestSignProposalFailed, err, "")
 	}
-	prop.Signature = p.Signature
 	th.logger.Debug("Signed proposal", "prop", prop)
 	// first check that it's a basically valid proposal
 	if err := prop.ValidateBasic(); err != nil {
@@ -247,7 +243,7 @@ func (th *TestHarness) TestSignProposal() error {
 		return err
 	}
 	// now validate the signature on the proposal
-	if sck.VerifySignature(propBytes, prop.Signature) {
+	if sck.VerifyBytes(propBytes, prop.Signature) {
 		th.logger.Info("Successfully validated proposal signature")
 	} else {
 		th.logger.Error("FAILED: Proposal signature validation failed")
@@ -269,7 +265,7 @@ func (th *TestHarness) TestSignVote() error {
 			Round:  0,
 			BlockID: types.BlockID{
 				Hash: hash,
-				PartSetHeader: types.PartSetHeader{
+				PartsHeader: types.PartSetHeader{
 					Hash:  hash,
 					Total: 1000000,
 				},
@@ -278,14 +274,12 @@ func (th *TestHarness) TestSignVote() error {
 			ValidatorAddress: tmhash.SumTruncated([]byte("addr")),
 			Timestamp:        time.Now(),
 		}
-		v := vote.ToProto()
-		voteBytes := types.VoteSignBytes(th.chainID, v)
+		voteBytes := vote.SignBytes(th.chainID)
 		// sign the vote
-		if err := th.signerClient.SignVote(th.chainID, v); err != nil {
+		if err := th.signerClient.SignVote(th.chainID, vote); err != nil {
 			th.logger.Error("FAILED: Signing of vote", "err", err)
 			return newTestHarnessError(ErrTestSignVoteFailed, err, fmt.Sprintf("voteType=%d", voteType))
 		}
-		vote.Signature = v.Signature
 		th.logger.Debug("Signed vote", "vote", vote)
 		// validate the contents of the vote
 		if err := vote.ValidateBasic(); err != nil {
@@ -298,7 +292,7 @@ func (th *TestHarness) TestSignVote() error {
 		}
 
 		// now validate the signature on the proposal
-		if sck.VerifySignature(voteBytes, vote.Signature) {
+		if sck.VerifyBytes(voteBytes, vote.Signature) {
 			th.logger.Info("Successfully validated vote signature", "type", voteType)
 		} else {
 			th.logger.Error("FAILED: Vote signature validation failed", "type", voteType)
@@ -374,7 +368,6 @@ func newTestHarnessListener(logger log.Logger, cfg TestHarnessConfig) (*privval.
 		logger.Info("Resolved TCP address for listener", "addr", tcpLn.Addr())
 		svln = tcpLn
 	default:
-		_ = ln.Close()
 		logger.Error("Unsupported protocol (must be unix:// or tcp://)", "proto", proto)
 		return nil, newTestHarnessError(ErrInvalidParameters, nil, fmt.Sprintf("Unsupported protocol: %s", proto))
 	}

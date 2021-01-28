@@ -6,9 +6,6 @@ import (
 	"testing"
 
 	cfg "github.com/tendermint/tendermint/config"
-	"github.com/tendermint/tendermint/crypto/tmhash"
-	tmrand "github.com/tendermint/tendermint/libs/rand"
-	tmproto "github.com/tendermint/tendermint/proto/tendermint/types"
 	"github.com/tendermint/tendermint/types"
 	tmtime "github.com/tendermint/tendermint/types/time"
 )
@@ -27,19 +24,19 @@ func TestPeerCatchupRounds(t *testing.T) {
 
 	hvs := NewHeightVoteSet(config.ChainID(), 1, valSet)
 
-	vote999_0 := makeVoteHR(t, 1, 0, 999, privVals)
+	vote999_0 := makeVoteHR(t, 1, 999, privVals, 0)
 	added, err := hvs.AddVote(vote999_0, "peer1")
 	if !added || err != nil {
 		t.Error("Expected to successfully add vote from peer", added, err)
 	}
 
-	vote1000_0 := makeVoteHR(t, 1, 0, 1000, privVals)
+	vote1000_0 := makeVoteHR(t, 1, 1000, privVals, 0)
 	added, err = hvs.AddVote(vote1000_0, "peer1")
 	if !added || err != nil {
 		t.Error("Expected to successfully add vote from peer", added, err)
 	}
 
-	vote1001_0 := makeVoteHR(t, 1, 0, 1001, privVals)
+	vote1001_0 := makeVoteHR(t, 1, 1001, privVals, 0)
 	added, err = hvs.AddVote(vote1001_0, "peer1")
 	if err != ErrGotVoteFromUnwantedRound {
 		t.Errorf("expected GotVoteFromUnwantedRoundError, but got %v", err)
@@ -55,14 +52,12 @@ func TestPeerCatchupRounds(t *testing.T) {
 
 }
 
-func makeVoteHR(t *testing.T, height int64, valIndex, round int32, privVals []types.PrivValidator) *types.Vote {
+func makeVoteHR(t *testing.T, height int64, round int, privVals []types.PrivValidator, valIndex int) *types.Vote {
 	privVal := privVals[valIndex]
 	pubKey, err := privVal.GetPubKey()
 	if err != nil {
 		panic(err)
 	}
-
-	randBytes := tmrand.Bytes(tmhash.Size)
 
 	vote := &types.Vote{
 		ValidatorAddress: pubKey.Address(),
@@ -70,18 +65,13 @@ func makeVoteHR(t *testing.T, height int64, valIndex, round int32, privVals []ty
 		Height:           height,
 		Round:            round,
 		Timestamp:        tmtime.Now(),
-		Type:             tmproto.PrecommitType,
-		BlockID:          types.BlockID{Hash: randBytes, PartSetHeader: types.PartSetHeader{}},
+		Type:             types.PrecommitType,
+		BlockID:          types.BlockID{Hash: []byte("fakehash"), PartsHeader: types.PartSetHeader{}},
 	}
 	chainID := config.ChainID()
-
-	v := vote.ToProto()
-	err = privVal.SignVote(chainID, v)
+	err = privVal.SignVote(chainID, vote)
 	if err != nil {
 		panic(fmt.Sprintf("Error signing vote: %v", err))
 	}
-
-	vote.Signature = v.Signature
-
 	return vote
 }

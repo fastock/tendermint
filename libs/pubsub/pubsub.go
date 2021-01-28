@@ -36,11 +36,11 @@ package pubsub
 
 import (
 	"context"
-	"errors"
-	"fmt"
+	"sync"
+
+	"github.com/pkg/errors"
 
 	"github.com/tendermint/tendermint/libs/service"
-	tmsync "github.com/tendermint/tendermint/libs/sync"
 )
 
 type operation int
@@ -96,7 +96,7 @@ type Server struct {
 
 	// check if we have subscription before
 	// subscribing or unsubscribing
-	mtx           tmsync.RWMutex
+	mtx           sync.RWMutex
 	subscriptions map[string]map[string]struct{} // subscriber -> query (string) -> empty struct
 }
 
@@ -410,7 +410,7 @@ func (state *state) send(msg interface{}, events map[string][]string) error {
 
 		match, err := q.Matches(events)
 		if err != nil {
-			return fmt.Errorf("failed to match against query %s: %w", q.String(), err)
+			return errors.Wrapf(err, "failed to match against query %s", q.String())
 		}
 
 		if match {

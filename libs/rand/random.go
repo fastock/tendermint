@@ -3,9 +3,8 @@ package rand
 import (
 	crand "crypto/rand"
 	mrand "math/rand"
+	"sync"
 	"time"
-
-	tmsync "github.com/tendermint/tendermint/libs/sync"
 )
 
 const (
@@ -20,7 +19,7 @@ const (
 // All of the methods here are suitable for concurrent use.
 // This is achieved by using a mutex lock on all of the provided methods.
 type Rand struct {
-	tmsync.Mutex
+	sync.Mutex
 	rand *mrand.Rand
 }
 
@@ -48,7 +47,7 @@ func (r *Rand) init() {
 }
 
 func (r *Rand) reset(seed int64) {
-	r.rand = mrand.New(mrand.NewSource(seed)) // nolint:gosec // G404: Use of weak random number generator
+	r.rand = mrand.New(mrand.NewSource(seed))
 }
 
 //----------------------------------------
@@ -149,10 +148,6 @@ func (r *Rand) Seed(seed int64) {
 
 // Str constructs a random alphanumeric string of given length.
 func (r *Rand) Str(length int) string {
-	if length <= 0 {
-		return ""
-	}
-
 	chars := []byte{}
 MAIN_LOOP:
 	for {

@@ -1,19 +1,18 @@
 package timer
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	// make govet noshadow happy...
 
 	asrt "github.com/stretchr/testify/assert"
-
-	tmsync "github.com/tendermint/tendermint/libs/sync"
 )
 
 type thCounter struct {
 	input chan struct{}
-	mtx   tmsync.Mutex
+	mtx   sync.Mutex
 	count int
 }
 
@@ -67,16 +66,14 @@ func TestThrottle(test *testing.T) {
 	time.Sleep(longwait)
 	assert.Equal(2, c.Count())
 
-	// send 12, over 2 delay sections, adds 3 or more. It
-	// is possible for more to be added if the overhead
-	// in executing the loop is large
+	// send 12, over 2 delay sections, adds 3
 	short := time.Duration(ms/5) * time.Millisecond
 	for i := 0; i < 13; i++ {
 		t.Set()
 		time.Sleep(short)
 	}
 	time.Sleep(longwait)
-	assert.LessOrEqual(5, c.Count())
+	assert.Equal(5, c.Count())
 
 	close(t.Ch)
 }

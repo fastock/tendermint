@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/tendermint/tendermint/crypto/ed25519"
+	p2pconn "github.com/tendermint/tendermint/p2p/conn"
 )
 
 const (
@@ -43,7 +44,7 @@ var _ net.Listener = (*TCPListener)(nil)
 type TCPListener struct {
 	*net.TCPListener
 
-	secretConnKey ed25519.PrivKey
+	secretConnKey ed25519.PrivKeyEd25519
 
 	timeoutAccept    time.Duration
 	timeoutReadWrite time.Duration
@@ -51,7 +52,7 @@ type TCPListener struct {
 
 // NewTCPListener returns a listener that accepts authenticated encrypted connections
 // using the given secretConnKey and the default timeout values.
-func NewTCPListener(ln net.Listener, secretConnKey ed25519.PrivKey) *TCPListener {
+func NewTCPListener(ln net.Listener, secretConnKey ed25519.PrivKeyEd25519) *TCPListener {
 	return &TCPListener{
 		TCPListener:      ln.(*net.TCPListener),
 		secretConnKey:    secretConnKey,
@@ -75,7 +76,7 @@ func (ln *TCPListener) Accept() (net.Conn, error) {
 
 	// Wrap the conn in our timeout and encryption wrappers
 	timeoutConn := newTimeoutConn(tc, ln.timeoutReadWrite)
-	secretConn, err := MakeSecretConnection(timeoutConn, ln.secretConnKey)
+	secretConn, err := p2pconn.MakeSecretConnection(timeoutConn, ln.secretConnKey)
 	if err != nil {
 		return nil, err
 	}

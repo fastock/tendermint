@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	amino "github.com/tendermint/go-amino"
+
 	"github.com/tendermint/tendermint/libs/log"
 	types "github.com/tendermint/tendermint/rpc/jsonrpc/types"
 )
@@ -20,10 +22,11 @@ func testMux() *http.ServeMux {
 	funcMap := map[string]*RPCFunc{
 		"c": NewRPCFunc(func(ctx *types.Context, s string, i int) (string, error) { return "foo", nil }, "s,i"),
 	}
+	cdc := amino.NewCodec()
 	mux := http.NewServeMux()
 	buf := new(bytes.Buffer)
 	logger := log.NewTMLogger(buf)
-	RegisterRPCFuncs(mux, funcMap, logger)
+	RegisterRPCFuncs(mux, funcMap, cdc, logger)
 
 	return mux
 }
@@ -65,7 +68,7 @@ func TestRPCParams(t *testing.T) {
 		res := rec.Result()
 		defer res.Body.Close()
 		// Always expecting back a JSONRPCResponse
-		assert.NotZero(t, res.StatusCode, "#%d: should always return code", i)
+		assert.True(t, statusOK(res.StatusCode), "#%d: should always return 2XX", i)
 		blob, err := ioutil.ReadAll(res.Body)
 		if err != nil {
 			t.Errorf("#%d: err reading body: %v", i, err)
@@ -112,7 +115,7 @@ func TestJSONRPCID(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		res := rec.Result()
 		// Always expecting back a JSONRPCResponse
-		assert.NotZero(t, res.StatusCode, "#%d: should always return code", i)
+		assert.True(t, statusOK(res.StatusCode), "#%d: should always return 2XX", i)
 		blob, err := ioutil.ReadAll(res.Body)
 		if err != nil {
 			t.Errorf("#%d: err reading body: %v", i, err)

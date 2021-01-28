@@ -1,16 +1,15 @@
-version: v1beta1
-
 build:
   roots:
-    - proto
-    - third_party/proto
+    - .
 lint:
   use:
-    - BASIC
+    - MINIMAL
     - FILE_LOWER_SNAKE_CASE
     - UNARY_RPC
+  except:
+    - PACKAGE_DIRECTORY_MATCH
   ignore:
-    - gogoproto
+    - third_party
 breaking:
   use:
     - FILE

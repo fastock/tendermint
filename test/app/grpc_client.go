@@ -7,7 +7,8 @@ import (
 
 	"context"
 
-	tmjson "github.com/tendermint/tendermint/libs/json"
+	amino "github.com/tendermint/go-amino"
+
 	coregrpc "github.com/tendermint/tendermint/rpc/grpc"
 )
 
@@ -33,7 +34,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	bz, err := tmjson.Marshal(res)
+	bz, err := amino.NewCodec().MarshalJSON(res)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)

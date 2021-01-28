@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	dbm "github.com/tendermint/tm-db"
+
 	cfg "github.com/tendermint/tendermint/config"
 	"github.com/tendermint/tendermint/consensus"
 	"github.com/tendermint/tendermint/crypto"
@@ -56,8 +58,6 @@ type transport interface {
 
 type peers interface {
 	AddPersistentPeers([]string) error
-	AddUnconditionalPeerIDs([]string) error
-	AddPrivatePeerIDs([]string) error
 	DialPeersAsync([]string) error
 	Peers() p2p.IPeerSet
 }
@@ -67,11 +67,10 @@ type peers interface {
 // to be setup once during startup.
 type Environment struct {
 	// external, thread safe interfaces
-	ProxyAppQuery   proxy.AppConnQuery
-	ProxyAppMempool proxy.AppConnMempool
+	ProxyAppQuery proxy.AppConnQuery
 
 	// interfaces defined in types and above
-	StateStore     sm.Store
+	StateDB        dbm.DB
 	BlockStore     sm.BlockStore
 	EvidencePool   sm.EvidencePool
 	ConsensusState Consensus
@@ -93,33 +92,27 @@ type Environment struct {
 
 //----------------------------------------------
 
-func validatePage(pagePtr *int, perPage, totalCount int) (int, error) {
+func validatePage(page, perPage, totalCount int) (int, error) {
 	if perPage < 1 {
 		panic(fmt.Sprintf("zero or negative perPage: %d", perPage))
 	}
 
-	if pagePtr == nil { // no page parameter
-		return 1, nil
+	if page == 0 {
+		return 1, nil // default
 	}
 
 	pages := ((totalCount - 1) / perPage) + 1
 	if pages == 0 {
 		pages = 1 // one page (even if it's empty)
 	}
-	page := *pagePtr
-	if page <= 0 || page > pages {
-		return 1, fmt.Errorf("page should be within [1, %d] range, given %d", pages, page)
+	if page < 0 || page > pages {
+		return 1, fmt.Errorf("page should be within [0, %d] range, given %d", pages, page)
 	}
 
 	return page, nil
 }
 
-func validatePerPage(perPagePtr *int) int {
-	if perPagePtr == nil { // no per_page parameter
-		return defaultPerPage
-	}
-
-	perPage := *perPagePtr
+func validatePerPage(perPage int) int {
 	if perPage < 1 {
 		return defaultPerPage
 	} else if perPage > maxPerPage {
@@ -150,7 +143,7 @@ func getHeight(latestHeight int64, heightPtr *int64) (int64, error) {
 		}
 		base := env.BlockStore.Base()
 		if height < base {
-			return 0, fmt.Errorf("height %v is not available, lowest height is %v",
+			return 0, fmt.Errorf("height %v is not available, blocks pruned at height %v",
 				height, base)
 		}
 		return height, nil
@@ -159,7 +152,7 @@ func getHeight(latestHeight int64, heightPtr *int64) (int64, error) {
 }
 
 func latestUncommittedHeight() int64 {
-	nodeIsSyncing := env.ConsensusReactor.WaitSync()
+	nodeIsSyncing := env.ConsensusReactor.FastSync()
 	if nodeIsSyncing {
 		return env.BlockStore.Height()
 	}

@@ -1,6 +1,7 @@
 package kv
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -8,41 +9,60 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
-	"github.com/google/orderedcode"
+	"github.com/pkg/errors"
+
 	dbm "github.com/tendermint/tm-db"
 
-	abci "github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/libs/pubsub/query"
+	tmstring "github.com/tendermint/tendermint/libs/strings"
 	"github.com/tendermint/tendermint/state/txindex"
 	"github.com/tendermint/tendermint/types"
 )
 
+const (
+	tagKeySeparator = "/"
+)
+
 var _ txindex.TxIndexer = (*TxIndex)(nil)
 
-// TxIndex is the simplest possible indexer
-// It is backed by two kv stores:
-// 1. txhash - result  (primary key)
-// 2. event - txhash   (secondary key)
+// TxIndex is the simplest possible indexer, backed by key-value storage (levelDB).
 type TxIndex struct {
-	store dbm.DB
+	store                dbm.DB
+	compositeKeysToIndex []string
+	indexAllEvents       bool
 }
 
 // NewTxIndex creates new KV indexer.
-func NewTxIndex(store dbm.DB) *TxIndex {
-	return &TxIndex{
-		store: store,
+func NewTxIndex(store dbm.DB, options ...func(*TxIndex)) *TxIndex {
+	txi := &TxIndex{store: store, compositeKeysToIndex: make([]string, 0), indexAllEvents: false}
+	for _, o := range options {
+		o(txi)
+	}
+	return txi
+}
+
+// IndexEvents is an option for setting which composite keys to index.
+func IndexEvents(compositeKeys []string) func(*TxIndex) {
+	return func(txi *TxIndex) {
+		txi.compositeKeysToIndex = compositeKeys
+	}
+}
+
+// IndexAllEvents is an option for indexing all events.
+func IndexAllEvents() func(*TxIndex) {
+	return func(txi *TxIndex) {
+		txi.indexAllEvents = true
 	}
 }
 
 // Get gets transaction from the TxIndex storage and returns it or nil if the
 // transaction is not found.
-func (txi *TxIndex) Get(hash []byte) (*abci.TxResult, error) {
+func (txi *TxIndex) Get(hash []byte) (*types.TxResult, error) {
 	if len(hash) == 0 {
 		return nil, txindex.ErrorEmptyHash
 	}
 
-	rawBytes, err := txi.store.Get(primaryKey(hash))
+	rawBytes, err := txi.store.Get(hash)
 	if err != nil {
 		panic(err)
 	}
@@ -50,8 +70,8 @@ func (txi *TxIndex) Get(hash []byte) (*abci.TxResult, error) {
 		return nil, nil
 	}
 
-	txResult := new(abci.TxResult)
-	err = proto.Unmarshal(rawBytes, txResult)
+	txResult := new(types.TxResult)
+	err = cdc.UnmarshalBinaryBare(rawBytes, &txResult)
 	if err != nil {
 		return nil, fmt.Errorf("error reading TxResult: %v", err)
 	}
@@ -68,70 +88,59 @@ func (txi *TxIndex) AddBatch(b *txindex.Batch) error {
 	defer storeBatch.Close()
 
 	for _, result := range b.Ops {
-		hash := types.Tx(result.Tx).Hash()
+		hash := result.Tx.Hash()
 
 		// index tx by events
-		err := txi.indexEvents(result, hash, storeBatch)
-		if err != nil {
-			return err
+		txi.indexEvents(result, hash, storeBatch)
+
+		// index tx by height
+		if txi.indexAllEvents || tmstring.StringInSlice(types.TxHeightKey, txi.compositeKeysToIndex) {
+			storeBatch.Set(keyForHeight(result), hash)
 		}
 
-		// index by height (always)
-		err = storeBatch.Set(keyFromHeight(result), hash)
+		// index tx by hash
+		rawBytes, err := cdc.MarshalBinaryBare(result)
 		if err != nil {
 			return err
 		}
-
-		rawBytes, err := proto.Marshal(result)
-		if err != nil {
-			return err
-		}
-		// index by hash (always)
-		err = storeBatch.Set(primaryKey(hash), rawBytes)
-		if err != nil {
-			return err
-		}
+		storeBatch.Set(hash, rawBytes)
 	}
 
-	return storeBatch.WriteSync()
+	storeBatch.WriteSync()
+	return nil
 }
 
 // Index indexes a single transaction using the given list of events. Each key
 // that indexed from the tx's events is a composite of the event type and the
 // respective attribute's key delimited by a "." (eg. "account.number").
 // Any event with an empty type is not indexed.
-func (txi *TxIndex) Index(result *abci.TxResult) error {
+func (txi *TxIndex) Index(result *types.TxResult) error {
 	b := txi.store.NewBatch()
 	defer b.Close()
 
-	hash := types.Tx(result.Tx).Hash()
+	hash := result.Tx.Hash()
 
 	// index tx by events
-	err := txi.indexEvents(result, hash, b)
+	txi.indexEvents(result, hash, b)
+
+	// index tx by height
+	if txi.indexAllEvents || tmstring.StringInSlice(types.TxHeightKey, txi.compositeKeysToIndex) {
+		b.Set(keyForHeight(result), hash)
+	}
+
+	// index tx by hash
+	rawBytes, err := cdc.MarshalBinaryBare(result)
 	if err != nil {
 		return err
 	}
 
-	// index by height (always)
-	err = b.Set(keyFromHeight(result), hash)
-	if err != nil {
-		return err
-	}
+	b.Set(hash, rawBytes)
+	b.WriteSync()
 
-	rawBytes, err := proto.Marshal(result)
-	if err != nil {
-		return err
-	}
-	// index by hash (always)
-	err = b.Set(primaryKey(hash), rawBytes)
-	if err != nil {
-		return err
-	}
-
-	return b.WriteSync()
+	return nil
 }
 
-func (txi *TxIndex) indexEvents(result *abci.TxResult, hash []byte, store dbm.Batch) error {
+func (txi *TxIndex) indexEvents(result *types.TxResult, hash []byte, store dbm.SetDeleter) {
 	for _, event := range result.Result.Events {
 		// only index events with a non-empty type
 		if len(event.Type) == 0 {
@@ -143,22 +152,12 @@ func (txi *TxIndex) indexEvents(result *abci.TxResult, hash []byte, store dbm.Ba
 				continue
 			}
 
-			// index if `index: true` is set
 			compositeTag := fmt.Sprintf("%s.%s", event.Type, string(attr.Key))
-			// ensure event does not conflict with a reserved prefix key
-			if compositeTag == types.TxHashKey || compositeTag == types.TxHeightKey {
-				return fmt.Errorf("event type and attribute key \"%s\" is reserved. Please use a different key", compositeTag)
-			}
-			if attr.GetIndex() {
-				err := store.Set(keyFromEvent(compositeTag, attr.Value, result), hash)
-				if err != nil {
-					return err
-				}
+			if txi.indexAllEvents || tmstring.StringInSlice(compositeTag, txi.compositeKeysToIndex) {
+				store.Set(keyForEvent(compositeTag, attr.Value, result), hash)
 			}
 		}
 	}
-
-	return nil
 }
 
 // Search performs a search using the given query.
@@ -172,11 +171,11 @@ func (txi *TxIndex) indexEvents(result *abci.TxResult, hash []byte, store dbm.Ba
 //
 // Search will exit early and return any result fetched so far,
 // when a message is received on the context chan.
-func (txi *TxIndex) Search(ctx context.Context, q *query.Query) ([]*abci.TxResult, error) {
+func (txi *TxIndex) Search(ctx context.Context, q *query.Query) ([]*types.TxResult, error) {
 	// Potentially exit early.
 	select {
 	case <-ctx.Done():
-		results := make([]*abci.TxResult, 0)
+		results := make([]*types.TxResult, 0)
 		return results, nil
 	default:
 	}
@@ -187,22 +186,22 @@ func (txi *TxIndex) Search(ctx context.Context, q *query.Query) ([]*abci.TxResul
 	// get a list of conditions (like "tx.height > 5")
 	conditions, err := q.Conditions()
 	if err != nil {
-		return nil, fmt.Errorf("error during parsing conditions from query: %w", err)
+		return nil, errors.Wrap(err, "error during parsing conditions from query")
 	}
 
 	// if there is a hash condition, return the result immediately
 	hash, ok, err := lookForHash(conditions)
 	if err != nil {
-		return nil, fmt.Errorf("error during searching for a hash in the query: %w", err)
+		return nil, errors.Wrap(err, "error during searching for a hash in the query")
 	} else if ok {
 		res, err := txi.Get(hash)
 		switch {
 		case err != nil:
-			return []*abci.TxResult{}, fmt.Errorf("error while retrieving the result: %w", err)
+			return []*types.TxResult{}, errors.Wrap(err, "error while retrieving the result")
 		case res == nil:
-			return []*abci.TxResult{}, nil
+			return []*types.TxResult{}, nil
 		default:
-			return []*abci.TxResult{res}, nil
+			return []*types.TxResult{res}, nil
 		}
 	}
 
@@ -218,7 +217,7 @@ func (txi *TxIndex) Search(ctx context.Context, q *query.Query) ([]*abci.TxResul
 
 		for _, r := range ranges {
 			if !hashesInitialized {
-				filteredHashes = txi.matchRange(ctx, r, prefixFromCompositeKey(r.key), filteredHashes, true)
+				filteredHashes = txi.matchRange(ctx, r, startKey(r.key), filteredHashes, true)
 				hashesInitialized = true
 
 				// Ignore any remaining conditions if the first condition resulted
@@ -227,7 +226,7 @@ func (txi *TxIndex) Search(ctx context.Context, q *query.Query) ([]*abci.TxResul
 					break
 				}
 			} else {
-				filteredHashes = txi.matchRange(ctx, r, prefixFromCompositeKey(r.key), filteredHashes, false)
+				filteredHashes = txi.matchRange(ctx, r, startKey(r.key), filteredHashes, false)
 			}
 		}
 	}
@@ -242,7 +241,7 @@ func (txi *TxIndex) Search(ctx context.Context, q *query.Query) ([]*abci.TxResul
 		}
 
 		if !hashesInitialized {
-			filteredHashes = txi.match(ctx, c, prefixForCondition(c, height), filteredHashes, true)
+			filteredHashes = txi.match(ctx, c, startKeyForCondition(c, height), filteredHashes, true)
 			hashesInitialized = true
 
 			// Ignore any remaining conditions if the first condition resulted
@@ -251,15 +250,15 @@ func (txi *TxIndex) Search(ctx context.Context, q *query.Query) ([]*abci.TxResul
 				break
 			}
 		} else {
-			filteredHashes = txi.match(ctx, c, prefixForCondition(c, height), filteredHashes, false)
+			filteredHashes = txi.match(ctx, c, startKeyForCondition(c, height), filteredHashes, false)
 		}
 	}
 
-	results := make([]*abci.TxResult, 0, len(filteredHashes))
+	results := make([]*types.TxResult, 0, len(filteredHashes))
 	for _, h := range filteredHashes {
 		res, err := txi.Get(h)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get Tx{%X}: %w", h, err)
+			return nil, errors.Wrapf(err, "failed to get Tx{%X}", h)
 		}
 		results = append(results, res)
 
@@ -426,49 +425,23 @@ func (txi *TxIndex) match(
 			default:
 			}
 		}
-		if err := it.Error(); err != nil {
-			panic(err)
-		}
-
-	case c.Op == query.OpExists:
-		// XXX: can't use startKeyBz here because c.Operand is nil
-		// (e.g. "account.owner/<nil>/" won't match w/ a single row)
-		it, err := dbm.IteratePrefix(txi.store, prefixFromCompositeKey(c.CompositeKey))
-		if err != nil {
-			panic(err)
-		}
-		defer it.Close()
-
-		for ; it.Valid(); it.Next() {
-			tmpHashes[string(it.Value())] = it.Value()
-
-			// Potentially exit early.
-			select {
-			case <-ctx.Done():
-				break
-			default:
-			}
-		}
-		if err := it.Error(); err != nil {
-			panic(err)
-		}
 
 	case c.Op == query.OpContains:
 		// XXX: startKey does not apply here.
 		// For example, if startKey = "account.owner/an/" and search query = "account.owner CONTAINS an"
 		// we can't iterate with prefix "account.owner/an/" because we might miss keys like "account.owner/Ulan/"
-		it, err := dbm.IteratePrefix(txi.store, prefixFromCompositeKey(c.CompositeKey))
+		it, err := dbm.IteratePrefix(txi.store, startKey(c.CompositeKey))
 		if err != nil {
 			panic(err)
 		}
 		defer it.Close()
 
 		for ; it.Valid(); it.Next() {
-			value, err := parseValueFromKey(it.Key())
-			if err != nil {
+			if !isTagKey(it.Key()) {
 				continue
 			}
-			if strings.Contains(value, c.Operand.(string)) {
+
+			if strings.Contains(extractValueFromKey(it.Key()), c.Operand.(string)) {
 				tmpHashes[string(it.Value())] = it.Value()
 			}
 
@@ -478,9 +451,6 @@ func (txi *TxIndex) match(
 				break
 			default:
 			}
-		}
-		if err := it.Error(); err != nil {
-			panic(err)
 		}
 	default:
 		panic("other operators should be handled already")
@@ -545,12 +515,12 @@ func (txi *TxIndex) matchRange(
 
 LOOP:
 	for ; it.Valid(); it.Next() {
-		value, err := parseValueFromKey(it.Key())
-		if err != nil {
+		if !isTagKey(it.Key()) {
 			continue
 		}
+
 		if _, ok := r.AnyBound().(int64); ok {
-			v, err := strconv.ParseInt(value, 10, 64)
+			v, err := strconv.ParseInt(extractValueFromKey(it.Key()), 10, 64)
 			if err != nil {
 				continue LOOP
 			}
@@ -583,9 +553,6 @@ LOOP:
 		default:
 		}
 	}
-	if err := it.Error(); err != nil {
-		panic(err)
-	}
 
 	if len(tmpHashes) == 0 || firstRun {
 		// Either:
@@ -616,102 +583,47 @@ LOOP:
 	return filteredHashes
 }
 
-// ##########################  Keys  #############################
-//
-// The indexer has two types of kv stores:
-// 1. txhash - result  (primary key)
-// 2. event - txhash   (secondary key)
-//
-// The event key can be decomposed into 4 parts.
-// 1. A composite key which can be any string.
-// Usually something like "tx.height" or "account.owner"
-// 2. A value. That corresponds to the key. In the above
-// example the value could be "5" or "Ivan"
-// 3. The height of the Tx that aligns with the key and value.
-// 4. The index of the Tx that aligns with the key and value
+///////////////////////////////////////////////////////////////////////////////
+// Keys
 
-// the hash/primary key
-func primaryKey(hash []byte) []byte {
-	key, err := orderedcode.Append(
-		nil,
-		types.TxHashKey,
-		string(hash),
-	)
-	if err != nil {
-		panic(err)
-	}
-	return key
+func isTagKey(key []byte) bool {
+	return strings.Count(string(key), tagKeySeparator) == 3
 }
 
-// The event/secondary key
-func secondaryKey(compositeKey, value string, height int64, index uint32) []byte {
-	key, err := orderedcode.Append(
-		nil,
-		compositeKey,
+func extractValueFromKey(key []byte) string {
+	parts := strings.SplitN(string(key), tagKeySeparator, 3)
+	return parts[1]
+}
+
+func keyForEvent(key string, value []byte, result *types.TxResult) []byte {
+	return []byte(fmt.Sprintf("%s/%s/%d/%d",
+		key,
 		value,
-		height,
-		int64(index),
-	)
-	if err != nil {
-		panic(err)
-	}
-	return key
+		result.Height,
+		result.Index,
+	))
 }
 
-// parseValueFromKey parses an event key and extracts out the value, returning an error if one arises.
-// This will also involve ensuring that the key has the correct format.
-// CONTRACT: function doesn't check that the prefix is correct. This should have already been done by the iterator
-func parseValueFromKey(key []byte) (string, error) {
-	var (
-		compositeKey, value string
-		height, index       int64
-	)
-	remaining, err := orderedcode.Parse(string(key), &compositeKey, &value, &height, &index)
-	if err != nil {
-		return "", err
-	}
-	if len(remaining) != 0 {
-		return "", fmt.Errorf("unexpected remainder in key: %s", remaining)
-	}
-	return value, nil
+func keyForHeight(result *types.TxResult) []byte {
+	return []byte(fmt.Sprintf("%s/%d/%d/%d",
+		types.TxHeightKey,
+		result.Height,
+		result.Height,
+		result.Index,
+	))
 }
 
-func keyFromEvent(compositeKey string, value []byte, result *abci.TxResult) []byte {
-	return secondaryKey(compositeKey, string(value), result.Height, result.Index)
-}
-
-func keyFromHeight(result *abci.TxResult) []byte {
-	return secondaryKey(types.TxHeightKey, fmt.Sprintf("%d", result.Height), result.Height, result.Index)
-}
-
-// Prefixes: these represent an initial part of the key and are used by iterators to iterate over a small
-// section of the kv store during searches.
-
-func prefixFromCompositeKey(compositeKey string) []byte {
-	key, err := orderedcode.Append(nil, compositeKey)
-	if err != nil {
-		panic(err)
-	}
-	return key
-}
-
-func prefixFromCompositeKeyAndValue(compositeKey, value string) []byte {
-	key, err := orderedcode.Append(nil, compositeKey, value)
-	if err != nil {
-		panic(err)
-	}
-	return key
-}
-
-// a small utility function for getting a keys prefix based on a condition and a height
-func prefixForCondition(c query.Condition, height int64) []byte {
-	key := prefixFromCompositeKeyAndValue(c.CompositeKey, fmt.Sprintf("%v", c.Operand))
+func startKeyForCondition(c query.Condition, height int64) []byte {
 	if height > 0 {
-		var err error
-		key, err = orderedcode.Append(key, height)
-		if err != nil {
-			panic(err)
-		}
+		return startKey(c.CompositeKey, c.Operand, height)
 	}
-	return key
+	return startKey(c.CompositeKey, c.Operand)
+}
+
+func startKey(fields ...interface{}) []byte {
+	var b bytes.Buffer
+	for _, f := range fields {
+		b.Write([]byte(fmt.Sprintf("%v", f) + tagKeySeparator))
+	}
+	return b.Bytes()
 }

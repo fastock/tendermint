@@ -2,18 +2,17 @@ package privval
 
 import (
 	"io"
+	"sync"
 
 	"github.com/tendermint/tendermint/libs/service"
-	tmsync "github.com/tendermint/tendermint/libs/sync"
-	privvalproto "github.com/tendermint/tendermint/proto/tendermint/privval"
 	"github.com/tendermint/tendermint/types"
 )
 
 // ValidationRequestHandlerFunc handles different remoteSigner requests
 type ValidationRequestHandlerFunc func(
 	privVal types.PrivValidator,
-	requestMessage privvalproto.Message,
-	chainID string) (privvalproto.Message, error)
+	requestMessage SignerMessage,
+	chainID string) (SignerMessage, error)
 
 type SignerServer struct {
 	service.BaseService
@@ -22,7 +21,7 @@ type SignerServer struct {
 	chainID  string
 	privVal  types.PrivValidator
 
-	handlerMtx               tmsync.Mutex
+	handlerMtx               sync.Mutex
 	validationRequestHandler ValidationRequestHandlerFunc
 }
 
@@ -71,7 +70,7 @@ func (ss *SignerServer) servicePendingRequest() {
 		return
 	}
 
-	var res privvalproto.Message
+	var res SignerMessage
 	{
 		// limit the scope of the lock
 		ss.handlerMtx.Lock()
@@ -83,9 +82,11 @@ func (ss *SignerServer) servicePendingRequest() {
 		}
 	}
 
-	err = ss.endpoint.WriteMessage(res)
-	if err != nil {
-		ss.Logger.Error("SignerServer: writeMessage", "err", err)
+	if res != nil {
+		err = ss.endpoint.WriteMessage(res)
+		if err != nil {
+			ss.Logger.Error("SignerServer: writeMessage", "err", err)
+		}
 	}
 }
 

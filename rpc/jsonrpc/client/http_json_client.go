@@ -2,7 +2,6 @@ package client
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -10,8 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
-	tmsync "github.com/tendermint/tendermint/libs/sync"
+	"github.com/pkg/errors"
+	amino "github.com/tendermint/go-amino"
+
 	types "github.com/tendermint/tendermint/rpc/jsonrpc/types"
 )
 
@@ -66,7 +68,7 @@ func (u parsedURL) GetHostWithPath() string {
 // Get a trimmed address - useful for WS connections
 func (u parsedURL) GetTrimmedHostWithPath() string {
 	// replace / with . for http requests (kvstore domain)
-	return strings.ReplaceAll(u.GetHostWithPath(), "/", ".")
+	return strings.Replace(u.GetHostWithPath(), "/", ".", -1)
 }
 
 // Get a trimmed address with protocol - useful as address in RPC connections
@@ -79,18 +81,25 @@ func (u parsedURL) GetTrimmedURL() string {
 // HTTPClient is a common interface for JSON-RPC HTTP clients.
 type HTTPClient interface {
 	// Call calls the given method with the params and returns a result.
-	Call(ctx context.Context, method string, params map[string]interface{}, result interface{}) (interface{}, error)
+	Call(method string, params map[string]interface{}, result interface{}) (interface{}, error)
+	// Codec returns an amino codec used.
+	Codec() *amino.Codec
+	// SetCodec sets an amino codec.
+	SetCodec(*amino.Codec)
 }
 
 // Caller implementers can facilitate calling the JSON-RPC endpoint.
 type Caller interface {
-	Call(ctx context.Context, method string, params map[string]interface{}, result interface{}) (interface{}, error)
+	Call(method string, params map[string]interface{}, result interface{}) (interface{}, error)
 }
 
 //-------------------------------------------------------------
 
 // Client is a JSON-RPC client, which sends POST HTTP requests to the
 // remote server.
+//
+// Request values are amino encoded. Response is expected to be amino encoded.
+// New amino codec is used if no other codec was set using SetCodec.
 //
 // Client is safe for concurrent use by multiple goroutines.
 type Client struct {
@@ -99,8 +108,9 @@ type Client struct {
 	password string
 
 	client *http.Client
+	cdc    *amino.Codec
 
-	mtx       tmsync.Mutex
+	mtx       sync.Mutex
 	nextReqID int
 }
 
@@ -145,57 +155,52 @@ func NewWithHTTPClient(remote string, client *http.Client) (*Client, error) {
 		username: username,
 		password: password,
 		client:   client,
+		cdc:      amino.NewCodec(),
 	}
 
 	return rpcClient, nil
 }
 
 // Call issues a POST HTTP request. Requests are JSON encoded. Content-Type:
-// application/json.
-func (c *Client) Call(
-	ctx context.Context,
-	method string,
-	params map[string]interface{},
-	result interface{},
-) (interface{}, error) {
+// text/json.
+func (c *Client) Call(method string, params map[string]interface{}, result interface{}) (interface{}, error) {
 	id := c.nextRequestID()
 
-	request, err := types.MapToRequest(id, method, params)
+	request, err := types.MapToRequest(c.cdc, id, method, params)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode params: %w", err)
+		return nil, errors.Wrap(err, "failed to encode params")
 	}
 
 	requestBytes, err := json.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, errors.Wrap(err, "failed to marshal request")
 	}
 
 	requestBuf := bytes.NewBuffer(requestBytes)
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.address, requestBuf)
+	httpRequest, err := http.NewRequest(http.MethodPost, c.address, requestBuf)
 	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
+		return nil, errors.Wrap(err, "Request failed")
 	}
-
-	httpRequest.Header.Set("Content-Type", "application/json")
-
+	httpRequest.Header.Set("Content-Type", "text/json")
 	if c.username != "" || c.password != "" {
 		httpRequest.SetBasicAuth(c.username, c.password)
 	}
-
 	httpResponse, err := c.client.Do(httpRequest)
 	if err != nil {
-		return nil, fmt.Errorf("post failed: %w", err)
+		return nil, errors.Wrap(err, "Post failed")
 	}
-
-	defer httpResponse.Body.Close()
+	defer httpResponse.Body.Close() // nolint: errcheck
 
 	responseBytes, err := ioutil.ReadAll(httpResponse.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, errors.Wrap(err, "failed to read response body")
 	}
 
-	return unmarshalResponseBytes(responseBytes, id, result)
+	return unmarshalResponseBytes(c.cdc, responseBytes, id, result)
 }
+
+func (c *Client) Codec() *amino.Codec       { return c.cdc }
+func (c *Client) SetCodec(cdc *amino.Codec) { c.cdc = cdc }
 
 // NewRequestBatch starts a batch of requests for this client.
 func (c *Client) NewRequestBatch() *RequestBatch {
@@ -205,7 +210,7 @@ func (c *Client) NewRequestBatch() *RequestBatch {
 	}
 }
 
-func (c *Client) sendBatch(ctx context.Context, requests []*jsonRPCBufferedRequest) ([]interface{}, error) {
+func (c *Client) sendBatch(requests []*jsonRPCBufferedRequest) ([]interface{}, error) {
 	reqs := make([]types.RPCRequest, 0, len(requests))
 	results := make([]interface{}, 0, len(requests))
 	for _, req := range requests {
@@ -216,30 +221,26 @@ func (c *Client) sendBatch(ctx context.Context, requests []*jsonRPCBufferedReque
 	// serialize the array of requests into a single JSON object
 	requestBytes, err := json.Marshal(reqs)
 	if err != nil {
-		return nil, fmt.Errorf("json marshal: %w", err)
+		return nil, errors.Wrap(err, "failed to marshal requests")
 	}
 
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.address, bytes.NewBuffer(requestBytes))
+	httpRequest, err := http.NewRequest(http.MethodPost, c.address, bytes.NewBuffer(requestBytes))
 	if err != nil {
-		return nil, fmt.Errorf("new request: %w", err)
+		return nil, errors.Wrap(err, "Request failed")
 	}
-
-	httpRequest.Header.Set("Content-Type", "application/json")
-
+	httpRequest.Header.Set("Content-Type", "text/json")
 	if c.username != "" || c.password != "" {
 		httpRequest.SetBasicAuth(c.username, c.password)
 	}
-
 	httpResponse, err := c.client.Do(httpRequest)
 	if err != nil {
-		return nil, fmt.Errorf("post: %w", err)
+		return nil, errors.Wrap(err, "Post failed")
 	}
-
-	defer httpResponse.Body.Close()
+	defer httpResponse.Body.Close() // nolint: errcheck
 
 	responseBytes, err := ioutil.ReadAll(httpResponse.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read response body: %w", err)
+		return nil, errors.Wrap(err, "failed to read response body")
 	}
 
 	// collect ids to check responses IDs in unmarshalResponseBytesArray
@@ -248,7 +249,7 @@ func (c *Client) sendBatch(ctx context.Context, requests []*jsonRPCBufferedReque
 		ids[i] = req.request.ID.(types.JSONRPCIntID)
 	}
 
-	return unmarshalResponseBytesArray(responseBytes, ids, results)
+	return unmarshalResponseBytesArray(c.cdc, responseBytes, ids, results)
 }
 
 func (c *Client) nextRequestID() types.JSONRPCIntID {
@@ -274,7 +275,7 @@ type jsonRPCBufferedRequest struct {
 type RequestBatch struct {
 	client *Client
 
-	mtx      tmsync.Mutex
+	mtx      sync.Mutex
 	requests []*jsonRPCBufferedRequest
 }
 
@@ -307,25 +308,24 @@ func (b *RequestBatch) clear() int {
 // Send will attempt to send the current batch of enqueued requests, and then
 // will clear out the requests once done. On success, this returns the
 // deserialized list of results from each of the enqueued requests.
-func (b *RequestBatch) Send(ctx context.Context) ([]interface{}, error) {
+func (b *RequestBatch) Send() ([]interface{}, error) {
 	b.mtx.Lock()
 	defer func() {
 		b.clear()
 		b.mtx.Unlock()
 	}()
-	return b.client.sendBatch(ctx, b.requests)
+	return b.client.sendBatch(b.requests)
 }
 
 // Call enqueues a request to call the given RPC method with the specified
 // parameters, in the same way that the `Client.Call` function would.
 func (b *RequestBatch) Call(
-	_ context.Context,
 	method string,
 	params map[string]interface{},
 	result interface{},
 ) (interface{}, error) {
 	id := b.client.nextRequestID()
-	request, err := types.MapToRequest(id, method, params)
+	request, err := types.MapToRequest(b.client.cdc, id, method, params)
 	if err != nil {
 		return nil, err
 	}
